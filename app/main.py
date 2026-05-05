@@ -8,7 +8,10 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
 
 from app.config import KISConfig, KISPaperConfig, AppSettings, MarketFilterConfig, UniverseConfig, load_strategy_configs
-from app.models import init_db, create_tables
+from fastapi import Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models import init_db, create_tables, get_session
 from app.models import database as db_module
 from app.broker.client import KISClient
 from app.broker.order import KISOrderAPI
@@ -161,3 +164,44 @@ async def trigger_job(job_name: str, request: Request):
     from zoneinfo import ZoneInfo
     job.modify(next_run_time=datetime.now(ZoneInfo("Asia/Seoul")))
     return {"status": "triggered", "job": job_name}
+
+
+@app.post("/reset-positions")
+async def reset_positions(request: Request, session: AsyncSession = Depends(get_session)):
+    """Delete all pending positions (for clean re-scan)."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from app.models.position import Position
+    result = await session.execute(select(Position).where(Position.status.in_(["pending_buy", "pending_sell"])))
+    positions = result.scalars().all()
+    count = len(positions)
+    for pos in positions:
+        await session.delete(pos)
+    await session.commit()
+    return {"status": "ok", "deleted": count}
+
+
+@app.post("/remove-position/{position_id}")
+async def remove_position(position_id: int, request: Request, session: AsyncSession = Depends(get_session)):
+    """Delete a single pending position by ID."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from app.models.position import Position
+    pos = await session.get(Position, position_id)
+    if not pos:
+        return {"error": "Position not found"}
+    symbol = pos.symbol
+    name = pos.name
+    await session.delete(pos)
+    await session.commit()
+    return {"status": "ok", "removed": f"{symbol} {name}"}
