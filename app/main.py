@@ -8,7 +8,8 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
 
 from app.config import KISConfig, AppSettings, MarketFilterConfig, UniverseConfig, load_strategy_configs
-from app.models import init_db, create_tables, async_session_factory
+from app.models import init_db, create_tables
+from app.models import database as db_module
 from app.broker.client import KISClient
 from app.broker.order import KISOrderAPI
 from app.broker.account import KISAccountAPI
@@ -74,15 +75,15 @@ async def lifespan(app: FastAPI):
     universe_config = UniverseConfig()
 
     async def _signal_job():
-        async with async_session_factory() as session:
+        async with db_module.async_session_factory() as session:
             await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier)
 
     async def _order_job():
-        async with async_session_factory() as session:
+        async with db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
 
     async def _confirm_job():
-        async with async_session_factory() as session:
+        async with db_module.async_session_factory() as session:
             await run_confirm_job(session, executor, notifier)
 
     async def _refresh_token():
