@@ -6,10 +6,39 @@
     <meta http-equiv="refresh" content="30">
     <title>Stock Auto Trading Bot V3</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+    async function triggerJob(jobName) {
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        const btn = event.target;
+        btn.disabled = true;
+        btn.textContent = '실행중...';
+        try {
+            const resp = await fetch(`/trigger/${jobName}?token=${token}`, {method: 'POST'});
+            const data = await resp.json();
+            if (data.status === 'triggered') {
+                btn.textContent = '✓ 트리거됨';
+                setTimeout(() => location.reload(), 3000);
+            } else {
+                btn.textContent = '✗ 실패';
+                alert(JSON.stringify(data));
+            }
+        } catch(e) {
+            btn.textContent = '✗ 에러';
+            alert(e.message);
+        }
+    }
+    </script>
 </head>
 <body class="bg-gray-900 text-gray-100 p-6">
     <div class="max-w-6xl mx-auto">
-        <h1 class="text-2xl font-bold mb-6">Stock Auto Trading Bot V3</h1>
+        <div class="flex items-center justify-between mb-6">
+            <h1 class="text-2xl font-bold">Stock Auto Trading Bot V3</h1>
+            <div class="flex gap-2">
+                <button onclick="triggerJob('signal_job')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium">📡 시그널 스캔</button>
+                <button onclick="triggerJob('order_job')" class="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded text-sm font-medium">💰 주문 실행</button>
+                <button onclick="triggerJob('confirm_job')" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 rounded text-sm font-medium">✅ 체결 확인</button>
+            </div>
+        </div>
 
         <!-- Account Info -->
         <div class="bg-gray-800 rounded-lg p-4 mb-6">
