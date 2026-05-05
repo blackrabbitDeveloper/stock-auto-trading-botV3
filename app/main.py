@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("DATABASE_URL not set — running without database")
 
-    # Init broker - real API for data/signals
+    # Init broker - real API (always needed for market data/signals)
     real_client = KISClient(kis_config)
     try:
         await real_client.refresh_token()
@@ -58,17 +58,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Real API token failed (will retry later): {e}")
 
-    # Init broker - paper API for order execution
-    paper_config = KISPaperConfig()
-    paper_client = KISClient(paper_config)
-    try:
-        await paper_client.refresh_token()
-        logger.info(f"Paper API token OK (account: {paper_config.account_no})")
-    except Exception as e:
-        logger.warning(f"Paper API token failed: {e}")
+    # Init broker - trading API (paper or real based on KIS_ENV)
+    if kis_config.env == "real":
+        # 실전: 주문도 실전 API 사용
+        trade_client = real_client
+        logger.info(f"Trading mode: REAL (account: {kis_config.account_no})")
+    else:
+        # 모의: 주문은 모의투자 API 사용
+        paper_config = KISPaperConfig()
+        trade_client = KISClient(paper_config)
+        try:
+            await trade_client.refresh_token()
+            logger.info(f"Trading mode: PAPER (account: {paper_config.account_no})")
+        except Exception as e:
+            logger.warning(f"Paper API token failed: {e}")
 
-    order_api = KISOrderAPI(paper_client)
-    account_api = KISAccountAPI(paper_client)
+    order_api = KISOrderAPI(trade_client)
+    account_api = KISAccountAPI(trade_client)
     sl_manager = SLManager(order_api)
     executor = OrderExecutor(order_api, account_api, sl_manager)
 
@@ -101,8 +107,9 @@ async def lifespan(app: FastAPI):
     async def _refresh_token():
         try:
             await real_client.refresh_token()
-            await paper_client.refresh_token()
-            logger.info("Both tokens refreshed successfully")
+            if trade_client is not real_client:
+                await trade_client.refresh_token()
+            logger.info("Tokens refreshed successfully")
         except Exception as e:
             logger.error(f"Token refresh failed: {e}")
             await notifier.send_error(f"Token refresh failed: {e}")
@@ -121,7 +128,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     scheduler.shutdown()
     await real_client.close()
-    await paper_client.close()
+    if trade_client is not real_client:
+        await trade_client.close()
     logger.info("Shutdown complete")
 
 
