@@ -70,6 +70,7 @@ class AppSettings(BaseSettings):
 
     class Config:
         env_prefix = ""
+        extra = "ignore"
 
 
 def load_strategy_configs(config_dir: str = "config") -> dict[str, StrategyParams]:

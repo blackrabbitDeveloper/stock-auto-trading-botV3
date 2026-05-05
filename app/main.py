@@ -41,9 +41,11 @@ async def lifespan(app: FastAPI):
 
     # Init DB
     db_url = _fix_database_url(settings.database_url)
+    logger.info(f"DATABASE_URL configured: {'yes' if db_url else 'no'} (len={len(db_url)})")
     if db_url:
         init_db(db_url)
         await create_tables()
+        logger.info("Database initialized successfully")
     else:
         logger.warning("DATABASE_URL not set — running without database")
 
