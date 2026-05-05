@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
 
-from app.config import KISConfig, AppSettings, MarketFilterConfig, UniverseConfig, load_strategy_configs
+from app.config import KISConfig, KISPaperConfig, AppSettings, MarketFilterConfig, UniverseConfig, load_strategy_configs
 from app.models import init_db, create_tables
 from app.models import database as db_module
 from app.broker.client import KISClient
@@ -50,14 +50,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("DATABASE_URL not set — running without database")
 
-    # Init broker
-    client = KISClient(kis_config)
+    # Init broker - real API for data/signals
+    real_client = KISClient(kis_config)
     try:
-        await client.refresh_token()
+        await real_client.refresh_token()
+        logger.info("Real API token OK")
     except Exception as e:
-        logger.warning(f"Broker token refresh failed (will retry later): {e}")
-    order_api = KISOrderAPI(client)
-    account_api = KISAccountAPI(client)
+        logger.warning(f"Real API token failed (will retry later): {e}")
+
+    # Init broker - paper API for order execution
+    paper_config = KISPaperConfig()
+    paper_client = KISClient(paper_config)
+    try:
+        await paper_client.refresh_token()
+        logger.info(f"Paper API token OK (account: {paper_config.account_no})")
+    except Exception as e:
+        logger.warning(f"Paper API token failed: {e}")
+
+    order_api = KISOrderAPI(paper_client)
+    account_api = KISAccountAPI(paper_client)
     sl_manager = SLManager(order_api)
     executor = OrderExecutor(order_api, account_api, sl_manager)
 
@@ -65,7 +76,8 @@ async def lifespan(app: FastAPI):
     notifier = DiscordNotifier(settings.discord_webhook_url)
 
     # Store in app state
-    app.state.client = client
+    app.state.real_client = real_client
+    app.state.paper_client = paper_client
     app.state.executor = executor
     app.state.notifier = notifier
     app.state.strategy_configs = strategy_configs
@@ -76,7 +88,7 @@ async def lifespan(app: FastAPI):
 
     async def _signal_job():
         async with db_module.async_session_factory() as session:
-            await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, client)
+            await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, real_client)
 
     async def _order_job():
         async with db_module.async_session_factory() as session:
@@ -88,16 +100,16 @@ async def lifespan(app: FastAPI):
 
     async def _refresh_token():
         try:
-            await client.refresh_token()
-            logger.info("Token refreshed successfully")
+            await real_client.refresh_token()
+            await paper_client.refresh_token()
+            logger.info("Both tokens refreshed successfully")
         except Exception as e:
             logger.error(f"Token refresh failed: {e}")
             await notifier.send_error(f"Token refresh failed: {e}")
 
     scheduler.add_job(_signal_job, CronTrigger(hour=15, minute=40), id="signal_job", misfire_grace_time=300)
-    # TODO: enable when ready for live trading
-    # scheduler.add_job(_order_job, CronTrigger(hour=8, minute=59), id="order_job", misfire_grace_time=60)
-    # scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
+    scheduler.add_job(_order_job, CronTrigger(hour=8, minute=59), id="order_job", misfire_grace_time=60)
+    scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
     scheduler.add_job(_refresh_token, CronTrigger(hour=8, minute=0), id="token_refresh")
 
     scheduler.start()
@@ -108,7 +120,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     scheduler.shutdown()
-    await client.close()
+    await real_client.close()
+    await paper_client.close()
     logger.info("Shutdown complete")
 
 

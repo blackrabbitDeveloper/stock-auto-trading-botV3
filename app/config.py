@@ -32,6 +32,29 @@ class KISConfig(BaseSettings):
         return self.account_no.split("-")[1]
 
 
+class KISPaperConfig(BaseSettings):
+    """모의투자 전용 설정 (주문 실행용)."""
+    app_key: str = ""
+    app_secret: str = ""
+    account_no: str = ""
+    env: str = "paper"
+
+    class Config:
+        env_prefix = "KIS_PAPER_"
+
+    @property
+    def base_url(self) -> str:
+        return "https://openapivts.koreainvestment.com:29443"
+
+    @property
+    def account_prefix(self) -> str:
+        return self.account_no.split("-")[0] if "-" in self.account_no else self.account_no
+
+    @property
+    def account_suffix(self) -> str:
+        return self.account_no.split("-")[1] if "-" in self.account_no else "01"
+
+
 class UniverseConfig(BaseModel):
     include_kospi: bool = True
     include_kosdaq: bool = True
