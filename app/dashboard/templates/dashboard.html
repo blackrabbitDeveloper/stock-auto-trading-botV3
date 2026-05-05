@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="30">
+    <title>Stock Auto Trading Bot V3</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 p-6">
+    <div class="max-w-6xl mx-auto">
+        <h1 class="text-2xl font-bold mb-6">Stock Auto Trading Bot V3</h1>
+
+        <!-- Strategy Summary -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            {% for name, info in strategy_summary.items() %}
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div class="text-sm text-gray-400">{{ name }}</div>
+                <div class="text-xl font-bold">{{ info.count }} positions</div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Active Positions -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3">보유 종목</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="text-gray-400 border-b border-gray-700">
+                        <tr>
+                            <th class="text-left py-2">종목</th>
+                            <th class="text-left">전략</th>
+                            <th class="text-right">매수가</th>
+                            <th class="text-right">SL</th>
+                            <th class="text-right">보유일</th>
+                            <th class="text-left">상태</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pos in positions %}
+                        <tr class="border-b border-gray-700/50">
+                            <td class="py-2">{{ pos.symbol }} {{ pos.name }}</td>
+                            <td>{{ pos.strategy }}</td>
+                            <td class="text-right">{{ "{:,}".format(pos.entry_price or 0) }}</td>
+                            <td class="text-right">{{ "{:,}".format(pos.sl_price or 0) }}</td>
+                            <td class="text-right">{{ pos.holding_days }}d</td>
+                            <td>
+                                {% if pos.status == 'active' %}
+                                <span class="text-green-400">보유중</span>
+                                {% elif pos.status == 'pending_buy' %}
+                                <span class="text-blue-400">매수대기</span>
+                                {% elif pos.status == 'pending_sell' %}
+                                <span class="text-red-400">매도대기</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        {% if not positions %}
+                        <tr><td colspan="6" class="py-4 text-center text-gray-500">포지션 없음</td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Trades -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <h2 class="text-lg font-semibold mb-3">최근 매매</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="text-gray-400 border-b border-gray-700">
+                        <tr>
+                            <th class="text-left py-2">날짜</th>
+                            <th class="text-left">종목</th>
+                            <th class="text-left">전략</th>
+                            <th class="text-right">수익률</th>
+                            <th class="text-right">손익</th>
+                            <th class="text-left">사유</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for trade in trades %}
+                        <tr class="border-b border-gray-700/50">
+                            <td class="py-2">{{ trade.exit_date }}</td>
+                            <td>{{ trade.symbol }} {{ trade.name }}</td>
+                            <td>{{ trade.strategy }}</td>
+                            <td class="text-right {% if trade.return_pct >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                                {{ "{:+.1%}".format(trade.return_pct) }}
+                            </td>
+                            <td class="text-right {% if trade.pnl >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                                {{ "{:+,}".format(trade.pnl) }}
+                            </td>
+                            <td>{{ trade.exit_reason }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if not trades %}
+                        <tr><td colspan="6" class="py-4 text-center text-gray-500">매매 기록 없음</td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Orders -->
+        <div class="bg-gray-800 rounded-lg p-4">
+            <h2 class="text-lg font-semibold mb-3">최근 주문</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="text-gray-400 border-b border-gray-700">
+                        <tr>
+                            <th class="text-left py-2">시간</th>
+                            <th class="text-left">종목</th>
+                            <th class="text-left">구분</th>
+                            <th class="text-right">수량</th>
+                            <th class="text-right">체결가</th>
+                            <th class="text-left">상태</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for order in orders %}
+                        <tr class="border-b border-gray-700/50">
+                            <td class="py-2">{{ order.submitted_at.strftime('%m-%d %H:%M') if order.submitted_at else '' }}</td>
+                            <td>{{ order.symbol }}</td>
+                            <td class="{% if order.side == 'buy' %}text-red-400{% else %}text-blue-400{% endif %}">
+                                {{ '매수' if order.side == 'buy' else '매도' }}
+                            </td>
+                            <td class="text-right">{{ order.qty }}</td>
+                            <td class="text-right">{{ "{:,}".format(order.filled_price or 0) }}</td>
+                            <td>{{ order.status }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if not orders %}
+                        <tr><td colspan="6" class="py-4 text-center text-gray-500">주문 기록 없음</td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
