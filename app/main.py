@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.config import KISConfig, AppSettings, MarketFilterConfig, UniverseConfig, load_strategy_configs
 from app.models import init_db, create_tables, async_session_factory
@@ -116,3 +116,23 @@ app.include_router(dashboard_router)
 async def health():
     jobs = {job.id: str(job.next_run_time) for job in scheduler.get_jobs()}
     return {"status": "ok", "jobs": jobs}
+
+
+@app.post("/trigger/{job_name}")
+async def trigger_job(job_name: str, request: Request):
+    """수동으로 job 트리거 (예: POST /trigger/signal_job?token=xxx)."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    job = scheduler.get_job(job_name)
+    if not job:
+        return {"error": f"Job '{job_name}' not found", "available": [j.id for j in scheduler.get_jobs()]}
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    job.modify(next_run_time=datetime.now(ZoneInfo("Asia/Seoul")))
+    return {"status": "triggered", "job": job_name}
