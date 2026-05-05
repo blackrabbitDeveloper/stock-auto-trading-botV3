@@ -95,8 +95,9 @@ async def lifespan(app: FastAPI):
             await notifier.send_error(f"Token refresh failed: {e}")
 
     scheduler.add_job(_signal_job, CronTrigger(hour=15, minute=40), id="signal_job", misfire_grace_time=300)
-    scheduler.add_job(_order_job, CronTrigger(hour=8, minute=59), id="order_job", misfire_grace_time=60)
-    scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
+    # TODO: enable when ready for live trading
+    # scheduler.add_job(_order_job, CronTrigger(hour=8, minute=59), id="order_job", misfire_grace_time=60)
+    # scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
     scheduler.add_job(_refresh_token, CronTrigger(hour=8, minute=0), id="token_refresh")
 
     scheduler.start()
