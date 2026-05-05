@@ -135,7 +135,7 @@
                     <tbody>
                         {% for pos in pending_buys %}
                         <tr class="border-b border-gray-700/50" id="pos-{{ pos.id }}">
-                            <td class="py-2 font-medium">{{ pos.symbol }} {{ pos.name }}</td>
+                            <td class="py-2 font-medium"><a href="https://finance.naver.com/item/main.naver?code={{ pos.symbol }}" target="_blank" class="hover:text-blue-400 underline decoration-gray-600">{{ pos.symbol }} {{ pos.name }}</a></td>
                             <td>{{ pos.strategy }}</td>
                             <td class="text-right">{{ pos.signal_date }}</td>
                             <td class="text-right text-red-300">{{ "{:,}".format(pos.sl_price or 0) }}</td>
@@ -167,7 +167,7 @@
                     <tbody>
                         {% for pos in pending_sells %}
                         <tr class="border-b border-gray-700/50">
-                            <td class="py-2 font-medium">{{ pos.symbol }} {{ pos.name }}</td>
+                            <td class="py-2 font-medium"><a href="https://finance.naver.com/item/main.naver?code={{ pos.symbol }}" target="_blank" class="hover:text-blue-400 underline decoration-gray-600">{{ pos.symbol }} {{ pos.name }}</a></td>
                             <td>{{ pos.strategy }}</td>
                             <td class="text-right">{{ "{:,}".format(pos.entry_price or 0) }}</td>
                             <td>{{ pos.exit_reason }}</td>
@@ -232,7 +232,7 @@
                         {% for trade in trades %}
                         <tr class="border-b border-gray-700/50">
                             <td class="py-2">{{ trade.exit_date }}</td>
-                            <td>{{ trade.symbol }} {{ trade.name }}</td>
+                            <td><a href="https://finance.naver.com/item/main.naver?code={{ trade.symbol }}" target="_blank" class="hover:text-blue-400 underline decoration-gray-600">{{ trade.symbol }} {{ trade.name }}</a></td>
                             <td>{{ trade.strategy }}</td>
                             <td class="text-right {% if trade.return_pct >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
                                 {{ "{:+.1%}".format(trade.return_pct) }}
