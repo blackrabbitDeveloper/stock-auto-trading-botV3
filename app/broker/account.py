@@ -102,7 +102,7 @@ class KISAccountAPI:
         """현재가 조회."""
         tr_id = "FHKST01010100"
         params = {
-            "FID_COND_MRKT_DIV_CD": "J",
+            "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": symbol,
         }
         data = await self.client.request("GET", "/uapi/domestic-stock/v1/quotations/inquire-price", tr_id, params=params)

@@ -22,15 +22,15 @@ class KISMarketAPI:
         Returns DataFrame with columns: open, high, low, close, volume
         Index: DatetimeIndex
         """
-        tr_id = "FHKST01010400"
+        tr_id = "FHKST03010100"
         today = datetime.now().strftime("%Y%m%d")
 
         params = {
-            "FID_COND_MRKT_DIV_CD": "J",
+            "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": symbol,
             "FID_INPUT_DATE_1": (datetime.now() - timedelta(days=period * 2)).strftime("%Y%m%d"),
             "FID_INPUT_DATE_2": today,
-            "FID_PERIOD_DIV_CD": "D",
+            "FID_PERIOD_DIV_CODE": "D",
             "FID_ORG_ADJ_PRC": "0",
         }
 
@@ -75,11 +75,11 @@ class KISMarketAPI:
         start = (datetime.now() - timedelta(days=60)).strftime("%Y%m%d")
 
         params = {
-            "FID_COND_MRKT_DIV_CD": "U",
+            "FID_COND_MRKT_DIV_CODE": "U",
             "FID_INPUT_ISCD": index_code,
             "FID_INPUT_DATE_1": start,
             "FID_INPUT_DATE_2": today,
-            "FID_PERIOD_DIV_CD": "D",
+            "FID_PERIOD_DIV_CODE": "D",
         }
 
         try:
@@ -112,7 +112,7 @@ class KISMarketAPI:
         """종목명 조회."""
         tr_id = "FHKST01010100"
         params = {
-            "FID_COND_MRKT_DIV_CD": "J",
+            "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": symbol,
         }
         try:
