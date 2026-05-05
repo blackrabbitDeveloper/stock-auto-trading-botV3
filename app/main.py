@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
     async def _signal_job():
         async with db_module.async_session_factory() as session:
-            await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier)
+            await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, client)
 
     async def _order_job():
         async with db_module.async_session_factory() as session:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta, date
+from datetime import date
+from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import select
@@ -9,10 +10,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import StrategyParams, MarketFilterConfig, UniverseConfig
 from app.models.position import Position
-from app.strategy import SIGNAL_GENERATORS, add_indicators, filter_universe, check_market_filter
+from app.strategy import SIGNAL_GENERATORS, add_indicators, filter_universe
+from app.broker.client import KISClient
+from app.broker.market import KISMarketAPI
 from app.notifier.discord import DiscordNotifier
 
 logger = logging.getLogger(__name__)
+
+UNIVERSE_CSV = Path("data/universe.csv")
+
+
+def load_universe_symbols() -> list[str]:
+    """Load symbol list from CSV."""
+    if not UNIVERSE_CSV.exists():
+        logger.error(f"Universe CSV not found: {UNIVERSE_CSV}")
+        return []
+    df = pd.read_csv(UNIVERSE_CSV, dtype={"symbol": str})
+    return df["symbol"].tolist()
 
 
 async def run_signal_job(
@@ -21,19 +35,25 @@ async def run_signal_job(
     market_filter_config: MarketFilterConfig,
     universe_config: UniverseConfig,
     notifier: DiscordNotifier,
+    kis_client: KISClient | None = None,
 ):
     """Daily signal generation job (runs at 15:40)."""
     today = date.today()
     today_str = today.strftime("%Y-%m-%d")
-    today_fmt = today.strftime("%Y%m%d")
-    lookback_start = (today - timedelta(days=120)).strftime("%Y%m%d")
 
     logger.info(f"Signal job started for {today_str}")
 
-    from pykrx import stock as pykrx_stock
+    # Init market API
+    if kis_client is None:
+        from app.config import KISConfig
+        kis_config = KISConfig()
+        kis_client = KISClient(kis_config)
+        await kis_client.refresh_token()
+
+    market_api = KISMarketAPI(kis_client)
 
     # Check market filter
-    market_open = check_market_filter(market_filter_config, today_str)
+    market_open = await _check_market_filter_api(market_api, market_filter_config)
 
     # Get all currently held/pending symbols across all strategies
     stmt = select(Position.symbol).where(Position.status.in_(["active", "pending_buy"]))
@@ -56,11 +76,10 @@ async def run_signal_job(
 
         for pos in active_positions:
             try:
-                df = pykrx_stock.get_market_ohlcv(lookback_start, today_fmt, pos.symbol)
+                df = await market_api.get_daily_ohlcv(pos.symbol)
                 if df.empty:
                     continue
 
-                df.columns = ["open", "high", "low", "close", "volume"]
                 today_close = int(df["close"].iloc[-1])
                 today_high = int(df["high"].iloc[-1])
 
@@ -96,31 +115,37 @@ async def run_signal_job(
             continue
 
         try:
-            # Load universe
-            all_symbols = pykrx_stock.get_market_ticker_list(today_fmt, market="ALL")
+            # Load universe from CSV
+            all_symbols = load_universe_symbols()
+            logger.info(f"[{strategy_name}] Scanning {len(all_symbols)} symbols...")
 
             # Load OHLCV and add indicators
             data_map = {}
             name_map = {}
             for sym in all_symbols:
+                if sym in existing_symbols:
+                    continue
                 try:
-                    ohlcv = pykrx_stock.get_market_ohlcv(lookback_start, today_fmt, sym)
+                    ohlcv = await market_api.get_daily_ohlcv(sym)
                     if ohlcv.empty or len(ohlcv) < 20:
                         continue
-                    ohlcv.columns = ["open", "high", "low", "close", "volume"]
                     data_map[sym] = add_indicators(ohlcv)
-                    name_map[sym] = pykrx_stock.get_market_ticker_name(sym)
                 except Exception:
                     continue
 
+            logger.info(f"[{strategy_name}] Loaded {len(data_map)} symbols with sufficient data")
+
+            # Get names for filtered symbols
+            for sym in data_map:
+                name_map[sym] = await market_api.get_stock_name(sym)
+
             # Filter universe
             filtered = filter_universe(list(data_map.keys()), data_map, universe_config, name_map)
+            logger.info(f"[{strategy_name}] {len(filtered)} symbols pass universe filter")
 
             # Generate signals
             candidates = []
             for sym in filtered:
-                if sym in existing_symbols:
-                    continue
                 df = data_map[sym]
                 signals = gen_func(df, config)
                 if not signals.empty and df.index[-1] in signals.index:
@@ -136,6 +161,8 @@ async def run_signal_job(
 
             # Top N by score
             candidates.sort(key=lambda x: x["score"], reverse=True)
+            logger.info(f"[{strategy_name}] {len(candidates)} signals generated")
+
             for c in candidates[:available_slots]:
                 sl_price = int(c["close"] - c["entry_atr"] * config.atr_sl_multiplier) if c["entry_atr"] > 0 else int(c["close"] * (1 - config.stop_loss_pct))
 
@@ -166,6 +193,36 @@ async def run_signal_job(
     # Send Discord alert
     await notifier.send_signal_alert(alerts)
     logger.info(f"Signal job complete: {len(alerts['pending_buys'])} buys, {len(alerts['pending_sells'])} sells")
+
+
+async def _check_market_filter_api(market_api: KISMarketAPI, config: MarketFilterConfig) -> bool:
+    """Check market filter using 한투 API."""
+    if not config.enabled:
+        return True
+
+    try:
+        # KOSPI index code for 한투 API = "0001"
+        index_code = "0001" if config.index_code == "KS11" else "1001"
+        index_df = await market_api.get_index_price(index_code)
+
+        if index_df.empty:
+            logger.warning("Market filter: no index data, allowing entries")
+            return True
+
+        ma = index_df["close"].rolling(config.ma_period).mean()
+        last_close = index_df["close"].iloc[-1]
+        last_ma = ma.iloc[-1]
+
+        if pd.isna(last_ma):
+            return True
+
+        allowed = last_close > last_ma
+        logger.info(f"Market filter: {last_close:,.0f} vs MA{config.ma_period} {last_ma:,.0f} -> {'OPEN' if allowed else 'BLOCKED'}")
+        return allowed
+
+    except Exception as e:
+        logger.error(f"Market filter error: {e}")
+        return True
 
 
 def _check_exit(pos: Position, today_close: int, config: StrategyParams) -> str | None:
