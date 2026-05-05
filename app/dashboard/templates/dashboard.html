@@ -11,15 +11,117 @@
     <div class="max-w-6xl mx-auto">
         <h1 class="text-2xl font-bold mb-6">Stock Auto Trading Bot V3</h1>
 
+        <!-- Account Info -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-lg font-semibold">계좌 정보</h2>
+                <span class="px-2 py-1 rounded text-xs font-bold {% if account.env == 'paper' %}bg-yellow-600{% else %}bg-red-600{% endif %}">
+                    {{ account.env_label }}
+                </span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                    <div class="text-sm text-gray-400">계좌번호</div>
+                    <div class="font-mono">{{ account.account_no }}</div>
+                </div>
+                <div>
+                    <div class="text-sm text-gray-400">총 평가금액</div>
+                    <div class="text-xl font-bold">{{ "{:,}".format(account.total_eval) }}원</div>
+                </div>
+                <div>
+                    <div class="text-sm text-gray-400">보유 현금</div>
+                    <div class="text-xl font-bold text-blue-400">{{ "{:,}".format(account.cash) }}원</div>
+                </div>
+                <div>
+                    <div class="text-sm text-gray-400">오늘 손익</div>
+                    <div class="text-xl font-bold {% if account.pnl_today >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                        {{ "{:+,}".format(account.pnl_today) }}원
+                    </div>
+                </div>
+            </div>
+            {% if account.error %}
+            <div class="mt-2 text-sm text-red-400">⚠ {{ account.error }}</div>
+            {% endif %}
+        </div>
+
         <!-- Strategy Summary -->
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             {% for name, info in strategy_summary.items() %}
             <div class="bg-gray-800 rounded-lg p-4">
                 <div class="text-sm text-gray-400">{{ name }}</div>
-                <div class="text-xl font-bold">{{ info.count }} positions</div>
+                <div class="text-lg font-bold">{{ info.active }} 보유</div>
+                {% if info.pending_buy > 0 %}
+                <div class="text-sm text-blue-400">+{{ info.pending_buy }} 매수대기</div>
+                {% endif %}
+                {% if info.pending_sell > 0 %}
+                <div class="text-sm text-red-400">{{ info.pending_sell }} 매도대기</div>
+                {% endif %}
             </div>
             {% endfor %}
+            {% if not strategy_summary %}
+            <div class="bg-gray-800 rounded-lg p-4 col-span-4">
+                <div class="text-gray-500">전략 포지션 없음</div>
+            </div>
+            {% endif %}
         </div>
+
+        <!-- Pending Buys (매수 예정) -->
+        {% if pending_buys %}
+        <div class="bg-gray-800 rounded-lg p-4 mb-6 border border-blue-500/30">
+            <h2 class="text-lg font-semibold mb-3 text-blue-400">📋 매수 예정 (내일 시초가)</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="text-gray-400 border-b border-gray-700">
+                        <tr>
+                            <th class="text-left py-2">종목</th>
+                            <th class="text-left">전략</th>
+                            <th class="text-right">시그널일</th>
+                            <th class="text-right">예상 SL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pos in pending_buys %}
+                        <tr class="border-b border-gray-700/50">
+                            <td class="py-2 font-medium">{{ pos.symbol }} {{ pos.name }}</td>
+                            <td>{{ pos.strategy }}</td>
+                            <td class="text-right">{{ pos.signal_date }}</td>
+                            <td class="text-right text-red-300">{{ "{:,}".format(pos.sl_price or 0) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Pending Sells (매도 예정) -->
+        {% if pending_sells %}
+        <div class="bg-gray-800 rounded-lg p-4 mb-6 border border-red-500/30">
+            <h2 class="text-lg font-semibold mb-3 text-red-400">📋 매도 예정 (내일 시초가)</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="text-gray-400 border-b border-gray-700">
+                        <tr>
+                            <th class="text-left py-2">종목</th>
+                            <th class="text-left">전략</th>
+                            <th class="text-right">매수가</th>
+                            <th class="text-left">사유</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pos in pending_sells %}
+                        <tr class="border-b border-gray-700/50">
+                            <td class="py-2 font-medium">{{ pos.symbol }} {{ pos.name }}</td>
+                            <td>{{ pos.strategy }}</td>
+                            <td class="text-right">{{ "{:,}".format(pos.entry_price or 0) }}</td>
+                            <td>{{ pos.exit_reason }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
 
         <!-- Active Positions -->
         <div class="bg-gray-800 rounded-lg p-4 mb-6">
@@ -32,8 +134,8 @@
                             <th class="text-left">전략</th>
                             <th class="text-right">매수가</th>
                             <th class="text-right">SL</th>
+                            <th class="text-right">Trail</th>
                             <th class="text-right">보유일</th>
-                            <th class="text-left">상태</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -42,21 +144,13 @@
                             <td class="py-2">{{ pos.symbol }} {{ pos.name }}</td>
                             <td>{{ pos.strategy }}</td>
                             <td class="text-right">{{ "{:,}".format(pos.entry_price or 0) }}</td>
-                            <td class="text-right">{{ "{:,}".format(pos.sl_price or 0) }}</td>
+                            <td class="text-right text-red-300">{{ "{:,}".format(pos.sl_price or 0) }}</td>
+                            <td class="text-right text-yellow-300">{{ "{:,}".format(pos.trail_price or 0) }}</td>
                             <td class="text-right">{{ pos.holding_days }}d</td>
-                            <td>
-                                {% if pos.status == 'active' %}
-                                <span class="text-green-400">보유중</span>
-                                {% elif pos.status == 'pending_buy' %}
-                                <span class="text-blue-400">매수대기</span>
-                                {% elif pos.status == 'pending_sell' %}
-                                <span class="text-red-400">매도대기</span>
-                                {% endif %}
-                            </td>
                         </tr>
                         {% endfor %}
                         {% if not positions %}
-                        <tr><td colspan="6" class="py-4 text-center text-gray-500">포지션 없음</td></tr>
+                        <tr><td colspan="6" class="py-4 text-center text-gray-500">보유 종목 없음</td></tr>
                         {% endif %}
                     </tbody>
                 </table>
