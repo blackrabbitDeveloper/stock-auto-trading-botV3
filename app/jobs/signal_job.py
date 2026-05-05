@@ -61,13 +61,8 @@ async def run_signal_job(
 
     alerts = {"date": today_str, "pending_buys": [], "pending_sells": []}
 
+    # ── 1. Check exits for all active positions ──
     for strategy_name, config in strategy_configs.items():
-        gen_func = SIGNAL_GENERATORS.get(strategy_name)
-        if not gen_func:
-            logger.warning(f"No signal generator for {strategy_name}")
-            continue
-
-        # 1. Check exits for active positions of this strategy
         stmt = select(Position).where(
             Position.strategy == strategy_name,
             Position.status == "active",
@@ -100,10 +95,43 @@ async def run_signal_job(
             except Exception as e:
                 logger.error(f"Exit check failed for {pos.symbol}: {e}")
 
-        # 2. Generate new buy signals (if market allows)
-        if not market_open:
+    # ── 2. Load OHLCV data ONCE for all symbols (shared across strategies) ──
+    if not market_open:
+        logger.info("Market filter BLOCKED — skipping new signals")
+        await session.commit()
+        await notifier.send_signal_alert(alerts)
+        return
+
+    all_symbols = load_universe_symbols()
+    logger.info(f"Loading OHLCV for {len(all_symbols)} symbols...")
+
+    data_map = {}
+    failed_symbols = []
+    for sym in all_symbols:
+        if sym in existing_symbols:
+            continue
+        try:
+            ohlcv = await market_api.get_daily_ohlcv(sym)
+            if ohlcv.empty or len(ohlcv) < 20:
+                continue
+            data_map[sym] = add_indicators(ohlcv)
+        except Exception:
+            failed_symbols.append(sym)
             continue
 
+    logger.info(f"Loaded {len(data_map)} symbols (failed: {len(failed_symbols)})")
+
+    # Filter universe once
+    filtered = filter_universe(list(data_map.keys()), data_map, universe_config)
+    logger.info(f"{len(filtered)} symbols pass universe filter")
+
+    # ── 3. Run each strategy on shared data ──
+    for strategy_name, config in strategy_configs.items():
+        gen_func = SIGNAL_GENERATORS.get(strategy_name)
+        if not gen_func:
+            continue
+
+        # Check available slots for this strategy
         stmt = select(Position).where(
             Position.strategy == strategy_name,
             Position.status.in_(["active", "pending_buy"]),
@@ -114,79 +142,49 @@ async def run_signal_job(
         if available_slots <= 0:
             continue
 
-        try:
-            # Load universe from CSV
-            all_symbols = load_universe_symbols()
-            logger.info(f"[{strategy_name}] Scanning {len(all_symbols)} symbols...")
-
-            # Load OHLCV and add indicators
-            data_map = {}
-            name_map = {}
-            for sym in all_symbols:
-                if sym in existing_symbols:
-                    continue
-                try:
-                    ohlcv = await market_api.get_daily_ohlcv(sym)
-                    if ohlcv.empty or len(ohlcv) < 20:
-                        continue
-                    data_map[sym] = add_indicators(ohlcv)
-                except Exception:
-                    continue
-
-            logger.info(f"[{strategy_name}] Loaded {len(data_map)} symbols with sufficient data")
-
-            # Get names for filtered symbols
-            for sym in data_map:
-                name_map[sym] = await market_api.get_stock_name(sym)
-
-            # Filter universe
-            filtered = filter_universe(list(data_map.keys()), data_map, universe_config, name_map)
-            logger.info(f"[{strategy_name}] {len(filtered)} symbols pass universe filter")
-
-            # Generate signals
-            candidates = []
-            for sym in filtered:
-                df = data_map[sym]
-                signals = gen_func(df, config)
-                if not signals.empty and df.index[-1] in signals.index:
-                    row = signals.loc[df.index[-1]]
-                    entry_atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else 0.0
-                    candidates.append({
-                        "symbol": sym,
-                        "name": name_map.get(sym, sym),
-                        "score": float(row["score"]),
-                        "close": float(df["close"].iloc[-1]),
-                        "entry_atr": entry_atr,
-                    })
-
-            # Top N by score
-            candidates.sort(key=lambda x: x["score"], reverse=True)
-            logger.info(f"[{strategy_name}] {len(candidates)} signals generated")
-
-            for c in candidates[:available_slots]:
-                sl_price = int(c["close"] - c["entry_atr"] * config.atr_sl_multiplier) if c["entry_atr"] > 0 else int(c["close"] * (1 - config.stop_loss_pct))
-
-                pos = Position(
-                    strategy=strategy_name,
-                    symbol=c["symbol"],
-                    name=c["name"],
-                    status="pending_buy",
-                    signal_date=today,
-                    entry_atr=c["entry_atr"],
-                    sl_price=sl_price,
-                )
-                session.add(pos)
-                existing_symbols.add(c["symbol"])
-
-                alerts["pending_buys"].append({
-                    "symbol": c["symbol"],
-                    "name": c["name"],
-                    "score": c["score"],
-                    "sl_price": sl_price,
+        # Generate signals using shared data
+        candidates = []
+        for sym in filtered:
+            if sym in existing_symbols:
+                continue
+            df = data_map[sym]
+            signals = gen_func(df, config)
+            if not signals.empty and df.index[-1] in signals.index:
+                row = signals.loc[df.index[-1]]
+                entry_atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else 0.0
+                candidates.append({
+                    "symbol": sym,
+                    "name": sym,  # use symbol as name (skip extra API call)
+                    "score": float(row["score"]),
+                    "close": float(df["close"].iloc[-1]),
+                    "entry_atr": entry_atr,
                 })
 
-        except Exception as e:
-            logger.error(f"Signal generation failed for {strategy_name}: {e}")
+        # Top N by score
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        logger.info(f"[{strategy_name}] {len(candidates)} signals generated")
+
+        for c in candidates[:available_slots]:
+            sl_price = int(c["close"] - c["entry_atr"] * config.atr_sl_multiplier) if c["entry_atr"] > 0 else int(c["close"] * (1 - config.stop_loss_pct))
+
+            pos = Position(
+                strategy=strategy_name,
+                symbol=c["symbol"],
+                name=c["name"],
+                status="pending_buy",
+                signal_date=today,
+                entry_atr=c["entry_atr"],
+                sl_price=sl_price,
+            )
+            session.add(pos)
+            existing_symbols.add(c["symbol"])
+
+            alerts["pending_buys"].append({
+                "symbol": c["symbol"],
+                "name": c["name"],
+                "score": c["score"],
+                "sl_price": sl_price,
+            })
 
     await session.commit()
 
@@ -201,7 +199,6 @@ async def _check_market_filter_api(market_api: KISMarketAPI, config: MarketFilte
         return True
 
     try:
-        # KOSPI index code for 한투 API = "0001"
         index_code = "0001" if config.index_code == "KS11" else "1001"
         index_df = await market_api.get_index_price(index_code)
 
