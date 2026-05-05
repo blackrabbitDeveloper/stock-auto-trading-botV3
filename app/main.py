@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
 
+def _fix_database_url(url: str) -> str:
+    """Convert Railway's postgresql:// to asyncpg format."""
+    if not url:
+        return url
+    if url.startswith("postgresql://") and "+asyncpg" not in url:
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown."""
@@ -31,12 +40,19 @@ async def lifespan(app: FastAPI):
     strategy_configs = load_strategy_configs("config")
 
     # Init DB
-    init_db(settings.database_url)
-    await create_tables()
+    db_url = _fix_database_url(settings.database_url)
+    if db_url:
+        init_db(db_url)
+        await create_tables()
+    else:
+        logger.warning("DATABASE_URL not set — running without database")
 
     # Init broker
     client = KISClient(kis_config)
-    await client.refresh_token()
+    try:
+        await client.refresh_token()
+    except Exception as e:
+        logger.warning(f"Broker token refresh failed (will retry later): {e}")
     order_api = KISOrderAPI(client)
     account_api = KISAccountAPI(client)
     sl_manager = SLManager(order_api)
