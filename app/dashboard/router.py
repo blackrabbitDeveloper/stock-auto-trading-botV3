@@ -25,33 +25,37 @@ def verify_token(request: Request):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def _get_account_info() -> dict:
-    """Fetch account info from broker API."""
+async def _get_account_info(request: Request) -> dict:
+    """Fetch account info using the trading client from app state."""
     try:
-        from app.broker.client import KISClient
         from app.broker.account import KISAccountAPI
 
-        kis_config = KISConfig()
-        client = KISClient(kis_config)
-        await client.refresh_token()
-        account_api = KISAccountAPI(client)
+        # Use the trade_client from app.state (paper or real depending on KIS_ENV)
+        trade_client = getattr(request.app.state, "trade_client", None)
+        if not trade_client:
+            raise RuntimeError("trade_client not initialized")
+
+        account_api = KISAccountAPI(trade_client)
         balance = await account_api.get_balance()
-        await client.close()
+
+        kis_config = KISConfig()
+        env = kis_config.env
 
         return {
-            "env": kis_config.env,
-            "env_label": "모의투자" if kis_config.env == "paper" else "실전",
-            "account_no": kis_config.account_no,
+            "env": env,
+            "env_label": "모의투자" if env == "paper" else "실전",
+            "account_no": trade_client.config.account_no,
             "total_eval": balance.total_eval,
             "cash": balance.cash,
             "stock_eval": balance.stock_eval,
             "pnl_today": balance.pnl_today,
         }
     except Exception as e:
+        kis_config = KISConfig()
         return {
-            "env": KISConfig().env,
-            "env_label": "모의투자" if KISConfig().env == "paper" else "실전",
-            "account_no": KISConfig().account_no,
+            "env": kis_config.env,
+            "env_label": "모의투자" if kis_config.env == "paper" else "실전",
+            "account_no": "",
             "total_eval": 0,
             "cash": 0,
             "stock_eval": 0,
@@ -63,13 +67,13 @@ async def _get_account_info() -> dict:
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
     # Account info
-    account = await _get_account_info()
+    account = await _get_account_info(request)
 
     # Active positions
     stmt = select(Position).where(Position.status.in_(["active", "pending_buy", "pending_sell"])).order_by(Position.strategy)
     positions = (await session.execute(stmt)).scalars().all()
 
-    # Pending buys (매수 예정)
+    # Pending buys
     pending_buys = [p for p in positions if p.status == "pending_buy"]
     active_positions = [p for p in positions if p.status == "active"]
     pending_sells = [p for p in positions if p.status == "pending_sell"]

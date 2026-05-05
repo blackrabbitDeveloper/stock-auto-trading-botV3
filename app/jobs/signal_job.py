@@ -20,13 +20,16 @@ logger = logging.getLogger(__name__)
 UNIVERSE_CSV = Path("data/universe.csv")
 
 
-def load_universe_symbols() -> list[str]:
-    """Load symbol list from CSV."""
+def load_universe() -> tuple[list[str], dict[str, str]]:
+    """Load symbol list and name map from CSV."""
     if not UNIVERSE_CSV.exists():
         logger.error(f"Universe CSV not found: {UNIVERSE_CSV}")
-        return []
+        return [], {}
     df = pd.read_csv(UNIVERSE_CSV, dtype={"symbol": str})
-    return df["symbol"].tolist()
+    df["name"] = df["name"].fillna(df["symbol"])
+    symbols = df["symbol"].tolist()
+    name_map = dict(zip(df["symbol"], df["name"]))
+    return symbols, name_map
 
 
 async def run_signal_job(
@@ -102,7 +105,7 @@ async def run_signal_job(
         await notifier.send_signal_alert(alerts)
         return
 
-    all_symbols = load_universe_symbols()
+    all_symbols, name_map = load_universe()
     logger.info(f"Loading OHLCV for {len(all_symbols)} symbols...")
 
     data_map = {}
@@ -154,7 +157,7 @@ async def run_signal_job(
                 entry_atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else 0.0
                 candidates.append({
                     "symbol": sym,
-                    "name": sym,  # use symbol as name (skip extra API call)
+                    "name": name_map.get(sym, sym),
                     "score": float(row["score"]),
                     "close": float(df["close"].iloc[-1]),
                     "entry_atr": entry_atr,

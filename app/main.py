@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 
     # Store in app state
     app.state.real_client = real_client
-    app.state.paper_client = paper_client
+    app.state.trade_client = trade_client
     app.state.executor = executor
     app.state.notifier = notifier
     app.state.strategy_configs = strategy_configs
