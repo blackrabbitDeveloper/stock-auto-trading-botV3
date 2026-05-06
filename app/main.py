@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -183,30 +184,35 @@ async def lifespan(app: FastAPI):
     sl_monitor = StopLossMonitor(real_client.config, _on_sl_hit)
     app.state.sl_monitor = sl_monitor
 
-    # Start SL monitor in background
+    # Start SL monitor in background (non-blocking)
     async def _start_sl_monitor():
         """Load active positions and start monitoring."""
-        async with db_module.async_session_factory() as session:
-            from app.models.position import Position
-            result = await session.execute(
-                select(Position).where(Position.status == "active")
-            )
-            positions = result.scalars().all()
-            pos_map = {}
-            for p in positions:
-                if p.sl_price or p.trail_price:
-                    pos_map[p.symbol] = {
-                        "sl_price": p.sl_price or 0,
-                        "trail_price": p.trail_price or 0,
-                        "qty": p.qty or 0,
-                    }
-            sl_monitor.update_positions(pos_map)
-        await sl_monitor.start()
-
-    sl_task = asyncio.create_task(_start_sl_monitor())
+        try:
+            async with db_module.async_session_factory() as session:
+                from app.models.position import Position
+                result = await session.execute(
+                    select(Position).where(Position.status == "active")
+                )
+                positions = result.scalars().all()
+                pos_map = {}
+                for p in positions:
+                    if p.sl_price or p.trail_price:
+                        pos_map[p.symbol] = {
+                            "sl_price": p.sl_price or 0,
+                            "trail_price": p.trail_price or 0,
+                            "qty": p.qty or 0,
+                        }
+                sl_monitor.update_positions(pos_map)
+            await sl_monitor.start()
+        except Exception as e:
+            logger.error(f"SL monitor failed: {e}")
 
     scheduler.start()
     logger.info(f"Scheduler started with {len(strategy_configs)} strategies")
+
+    # Launch SL monitor as background task (non-blocking)
+    sl_task = asyncio.create_task(_start_sl_monitor())
+
     await notifier.send("🟢 Auto Trading Bot started (SL monitor active)")
 
     yield
