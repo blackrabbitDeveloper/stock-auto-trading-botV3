@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Auto Trading Bot V3</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex items-center justify-center">
+    <div class="bg-gray-800 rounded-xl p-8 w-full max-w-sm shadow-2xl">
+        <h1 class="text-2xl font-bold text-center mb-2">Stock Auto Trading Bot</h1>
+        <p class="text-gray-400 text-center text-sm mb-6">V3 — 4 Strategy Automated Trading</p>
+
+        <form id="loginForm" class="space-y-4">
+            <div>
+                <label class="text-sm text-gray-400">Access Token</label>
+                <input type="password" id="tokenInput" placeholder="토큰을 입력하세요"
+                    class="w-full mt-1 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500">
+            </div>
+            <button type="submit"
+                class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium transition">
+                대시보드 접속
+            </button>
+        </form>
+
+        <p id="error" class="text-red-400 text-sm text-center mt-3 hidden">잘못된 토큰입니다.</p>
+    </div>
+
+    <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const token = document.getElementById('tokenInput').value.trim();
+        if (!token) return;
+
+        // Verify token by calling health or dashboard
+        try {
+            const resp = await fetch(`/api/status?token=${token}`);
+            if (resp.ok) {
+                // Save token and redirect
+                localStorage.setItem('dashboard_token', token);
+                window.location.href = `/dashboard?token=${token}`;
+            } else {
+                document.getElementById('error').classList.remove('hidden');
+            }
+        } catch(e) {
+            document.getElementById('error').classList.remove('hidden');
+        }
+    });
+
+    // Auto-redirect if token already saved
+    const saved = localStorage.getItem('dashboard_token');
+    if (saved) {
+        window.location.href = `/dashboard?token=${saved}`;
+    }
+    </script>
+</body>
+</html>

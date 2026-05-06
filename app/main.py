@@ -98,10 +98,42 @@ async def lifespan(app: FastAPI):
     async def _signal_job():
         async with db_module.async_session_factory() as session:
             await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, real_client)
+        # Update SL monitor with latest positions
+        async with db_module.async_session_factory() as session:
+            from app.models.position import Position
+            result = await session.execute(
+                select(Position).where(Position.status == "active")
+            )
+            positions = result.scalars().all()
+            pos_map = {}
+            for p in positions:
+                if p.sl_price or p.trail_price:
+                    pos_map[p.symbol] = {
+                        "sl_price": p.sl_price or 0,
+                        "trail_price": p.trail_price or 0,
+                        "qty": p.qty or 0,
+                    }
+            sl_monitor.update_positions(pos_map)
 
     async def _order_job():
         async with db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
+        # Update SL monitor with new positions
+        async with db_module.async_session_factory() as session:
+            from app.models.position import Position
+            result = await session.execute(
+                select(Position).where(Position.status == "active")
+            )
+            positions = result.scalars().all()
+            pos_map = {}
+            for p in positions:
+                if p.sl_price or p.trail_price:
+                    pos_map[p.symbol] = {
+                        "sl_price": p.sl_price or 0,
+                        "trail_price": p.trail_price or 0,
+                        "qty": p.qty or 0,
+                    }
+            sl_monitor.update_positions(pos_map)
 
     async def _confirm_job():
         async with db_module.async_session_factory() as session:
@@ -122,13 +154,66 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
     scheduler.add_job(_refresh_token, CronTrigger(hour=8, minute=0), id="token_refresh")
 
+    # WebSocket SL monitor
+    from app.broker.websocket import StopLossMonitor
+    from app.broker.order import KISOrderAPI
+
+    trade_order_api = KISOrderAPI(trade_client)
+
+    async def _on_sl_hit(symbol: str, price: int, reason: str):
+        """Callback when SL/trail is hit — immediately sell."""
+        async with db_module.async_session_factory() as session:
+            from app.models.position import Position
+            result = await session.execute(
+                select(Position).where(Position.symbol == symbol, Position.status == "active")
+            )
+            pos = result.scalars().first()
+            if pos and pos.qty:
+                sell_result = await trade_order_api.sell_market(pos.symbol, pos.qty)
+                if sell_result.success:
+                    pos.status = "pending_sell"
+                    pos.exit_reason = reason
+                    await session.commit()
+                    await notifier.send(f"🔻 SL HIT: {pos.symbol} {pos.name} | {reason} @ {price:,} | 시장가 매도")
+                    logger.warning(f"SL executed: {symbol} {reason} @ {price}")
+                else:
+                    logger.error(f"SL sell failed for {symbol}: {sell_result.message}")
+                    await notifier.send_error(f"SL sell failed: {symbol} {sell_result.message}")
+
+    sl_monitor = StopLossMonitor(real_client.config, _on_sl_hit)
+    app.state.sl_monitor = sl_monitor
+
+    # Start SL monitor in background
+    async def _start_sl_monitor():
+        """Load active positions and start monitoring."""
+        async with db_module.async_session_factory() as session:
+            from app.models.position import Position
+            result = await session.execute(
+                select(Position).where(Position.status == "active")
+            )
+            positions = result.scalars().all()
+            pos_map = {}
+            for p in positions:
+                if p.sl_price or p.trail_price:
+                    pos_map[p.symbol] = {
+                        "sl_price": p.sl_price or 0,
+                        "trail_price": p.trail_price or 0,
+                        "qty": p.qty or 0,
+                    }
+            sl_monitor.update_positions(pos_map)
+        await sl_monitor.start()
+
+    sl_task = asyncio.create_task(_start_sl_monitor())
+
     scheduler.start()
     logger.info(f"Scheduler started with {len(strategy_configs)} strategies")
-    await notifier.send("🟢 Auto Trading Bot started")
+    await notifier.send("🟢 Auto Trading Bot started (SL monitor active)")
 
     yield
 
     # Shutdown
+    await sl_monitor.stop()
+    sl_task.cancel()
     scheduler.shutdown()
     await real_client.close()
     if trade_client is not real_client:

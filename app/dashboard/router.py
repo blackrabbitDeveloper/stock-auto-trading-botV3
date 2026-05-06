@@ -64,6 +64,12 @@ async def _get_account_info(request: Request) -> dict:
         }
 
 
+@router.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """Login page."""
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
     # Account info
