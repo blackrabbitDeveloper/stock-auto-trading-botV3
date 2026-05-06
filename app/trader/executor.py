@@ -36,7 +36,7 @@ class OrderExecutor:
         results = []
 
         for pos in positions:
-            await asyncio.sleep(0.5)  # rate limit protection
+            await asyncio.sleep(1.0)  # rate limit protection
             order_result = await self.order_api.sell_market(pos.symbol, pos.qty)
 
             order = Order(
@@ -96,7 +96,7 @@ class OrderExecutor:
                 results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "잔고 부족"})
                 continue
 
-            await asyncio.sleep(0.5)  # rate limit protection
+            await asyncio.sleep(1.0)  # rate limit protection
             order_result = await self.order_api.buy_market(pos.symbol, qty)
 
             order = Order(
@@ -134,6 +134,12 @@ class OrderExecutor:
 
         stmt = select(Order).where(Order.status == "submitted")
         db_orders = (await session.execute(stmt)).scalars().all()
+
+        logger.info(f"Confirm: {len(filled_orders)} fills from API, {len(db_orders)} submitted orders in DB")
+        if filled_orders:
+            logger.info(f"API fills: {[(f.order_no, f.symbol, f.qty) for f in filled_orders[:5]]}")
+        if db_orders:
+            logger.info(f"DB orders: {[(o.order_no, o.symbol, o.qty) for o in db_orders[:5]]}")
 
         for db_order in db_orders:
             fill = next((f for f in filled_orders if f.order_no == db_order.order_no), None)
