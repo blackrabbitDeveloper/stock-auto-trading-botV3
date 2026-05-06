@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 
@@ -35,6 +36,7 @@ class OrderExecutor:
         results = []
 
         for pos in positions:
+            await asyncio.sleep(0.5)  # rate limit protection
             order_result = await self.order_api.sell_market(pos.symbol, pos.qty)
 
             order = Order(
@@ -63,6 +65,7 @@ class OrderExecutor:
 
     async def execute_buys(self, session: AsyncSession, strategy_configs: dict[str, StrategyParams]) -> list[dict]:
         """Execute all pending buy orders."""
+
         result = await session.execute(
             select(Position).where(Position.status == "pending_buy")
         )
@@ -77,7 +80,15 @@ class OrderExecutor:
                 logger.error(f"No config for strategy {pos.strategy}")
                 continue
 
-            price = await self.account_api.get_current_price(pos.symbol)
+            # Estimate entry price from SL + ATR (avoids extra API call that causes rate limit)
+            if pos.entry_atr and pos.entry_atr > 0 and pos.sl_price:
+                price = int(pos.sl_price + pos.entry_atr * config.atr_sl_multiplier)
+            elif pos.sl_price:
+                price = int(pos.sl_price / (1 - config.stop_loss_pct))
+            else:
+                logger.warning(f"Cannot estimate price for {pos.symbol}, skipping")
+                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "가격 추정 불가"})
+                continue
             qty = calc_quantity(balance.total_eval, config.capital_allocation, config.position_weight, price)
 
             if qty <= 0:
@@ -85,6 +96,7 @@ class OrderExecutor:
                 results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "잔고 부족"})
                 continue
 
+            await asyncio.sleep(0.5)  # rate limit protection
             order_result = await self.order_api.buy_market(pos.symbol, qty)
 
             order = Order(
