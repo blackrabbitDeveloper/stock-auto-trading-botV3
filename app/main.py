@@ -211,7 +211,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Scheduler started with {len(strategy_configs)} strategies")
 
     # Launch SL monitor as background task (non-blocking)
-    sl_task = asyncio.create_task(_start_sl_monitor())
+    # TODO: enable after WebSocket connectivity confirmed
+    # sl_task = asyncio.create_task(_start_sl_monitor())
+    sl_task = None
 
     await notifier.send("🟢 Auto Trading Bot started (SL monitor active)")
 
@@ -219,7 +221,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     await sl_monitor.stop()
-    sl_task.cancel()
+    if sl_task:
+        sl_task.cancel()
     scheduler.shutdown()
     await real_client.close()
     if trade_client is not real_client:
