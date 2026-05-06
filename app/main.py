@@ -177,10 +177,15 @@ async def reset_positions(request: Request, session: AsyncSession = Depends(get_
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     from app.models.position import Position
-    result = await session.execute(select(Position).where(Position.status.in_(["pending_buy", "pending_sell"])))
+    from app.models.order import Order
+    result = await session.execute(select(Position))
     positions = result.scalars().all()
     count = len(positions)
+    # Delete related orders first (FK constraint)
     for pos in positions:
+        orders = (await session.execute(select(Order).where(Order.position_id == pos.id))).scalars().all()
+        for order in orders:
+            await session.delete(order)
         await session.delete(pos)
     await session.commit()
     return {"status": "ok", "deleted": count}
@@ -197,9 +202,14 @@ async def remove_position(position_id: int, request: Request, session: AsyncSess
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     from app.models.position import Position
+    from app.models.order import Order
     pos = await session.get(Position, position_id)
     if not pos:
         return {"error": "Position not found"}
+    # Delete related orders first (FK constraint)
+    orders = (await session.execute(select(Order).where(Order.position_id == pos.id))).scalars().all()
+    for order in orders:
+        await session.delete(order)
     symbol = pos.symbol
     name = pos.name
     await session.delete(pos)
