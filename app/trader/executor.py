@@ -115,6 +115,9 @@ class OrderExecutor:
             if order_result.success:
                 pos.qty = qty
                 pos.status = "active"  # prevent re-buy on redeploy
+                pos.entry_price = price
+                pos.entry_date = date.today()
+                pos.peak_price = price
 
             results.append({
                 "symbol": pos.symbol,
