@@ -226,15 +226,20 @@ async def _check_market_filter_api(market_api: KISMarketAPI, config: MarketFilte
 
 
 def _check_exit(pos: Position, today_close: int, config: StrategyParams) -> str | None:
-    """Check exit conditions. Returns reason or None."""
+    """Check exit conditions using max(sl, trail) single trigger."""
     if pos.holding_days <= config.sl_skip_days:
         return None
 
-    if pos.sl_price and today_close <= pos.sl_price:
-        return "stop_loss"
+    sl_price = pos.sl_price or 0
+    trail_price = pos.trail_price or 0
 
-    if pos.trail_price and today_close <= pos.trail_price:
-        return "trailing_stop"
+    # MAX(SL, Trail) — matches real trading with single reservation order
+    exit_trigger = max(sl_price, trail_price)
+
+    if exit_trigger > 0 and today_close <= exit_trigger:
+        if trail_price > sl_price:
+            return "trailing_stop"
+        return "stop_loss"
 
     if pos.holding_days >= config.max_holding_days:
         return "time_exit"

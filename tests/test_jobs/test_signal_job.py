@@ -5,9 +5,10 @@ from datetime import date
 
 
 def test_check_exit_stop_loss():
+    # SL > trail → stop_loss
     pos = Position(
         strategy="vol", symbol="005930", name="삼성", status="active",
-        signal_date=date.today(), holding_days=3, sl_price=70000, trail_price=72000,
+        signal_date=date.today(), holding_days=3, sl_price=70000, trail_price=65000,
     )
     config = StrategyParams(name="vol", sl_skip_days=2, max_holding_days=10, trailing_stop_pct=0.05)
     result = _check_exit(pos, 69000, config)
