@@ -114,7 +114,8 @@ async def lifespan(app: FastAPI):
                         "trail_price": p.trail_price or 0,
                         "qty": p.qty or 0,
                     }
-            sl_monitor.update_positions(pos_map)
+            if sl_monitor:
+                sl_monitor.update_positions(pos_map)
 
     async def _order_job():
         async with db_module.async_session_factory() as session:
@@ -134,7 +135,8 @@ async def lifespan(app: FastAPI):
                         "trail_price": p.trail_price or 0,
                         "qty": p.qty or 0,
                     }
-            sl_monitor.update_positions(pos_map)
+            if sl_monitor:
+                sl_monitor.update_positions(pos_map)
 
     async def _confirm_job():
         async with db_module.async_session_factory() as session:
@@ -155,64 +157,22 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
     scheduler.add_job(_refresh_token, CronTrigger(hour=8, minute=0), id="token_refresh")
 
-    # WebSocket SL monitor
-    from app.broker.websocket import StopLossMonitor
-    from app.broker.order import KISOrderAPI
+    # WebSocket SL monitor (disabled until Railway WebSocket confirmed)
+    # from app.broker.websocket import StopLossMonitor
 
-    trade_order_api = KISOrderAPI(trade_client)
+    trade_order_api = order_api  # reuse existing
 
-    async def _on_sl_hit(symbol: str, price: int, reason: str):
-        """Callback when SL/trail is hit — immediately sell."""
-        async with db_module.async_session_factory() as session:
-            from app.models.position import Position
-            result = await session.execute(
-                select(Position).where(Position.symbol == symbol, Position.status == "active")
-            )
-            pos = result.scalars().first()
-            if pos and pos.qty:
-                sell_result = await trade_order_api.sell_market(pos.symbol, pos.qty)
-                if sell_result.success:
-                    pos.status = "pending_sell"
-                    pos.exit_reason = reason
-                    await session.commit()
-                    await notifier.send(f"🔻 SL HIT: {pos.symbol} {pos.name} | {reason} @ {price:,} | 시장가 매도")
-                    logger.warning(f"SL executed: {symbol} {reason} @ {price}")
-                else:
-                    logger.error(f"SL sell failed for {symbol}: {sell_result.message}")
-                    await notifier.send_error(f"SL sell failed: {symbol} {sell_result.message}")
+    # SL monitor callbacks and instance (disabled)
+    sl_monitor = None
+    app.state.sl_monitor = None
 
-    sl_monitor = StopLossMonitor(real_client.config, _on_sl_hit)
-    app.state.sl_monitor = sl_monitor
-
-    # Start SL monitor in background (non-blocking)
-    async def _start_sl_monitor():
-        """Load active positions and start monitoring."""
-        try:
-            async with db_module.async_session_factory() as session:
-                from app.models.position import Position
-                result = await session.execute(
-                    select(Position).where(Position.status == "active")
-                )
-                positions = result.scalars().all()
-                pos_map = {}
-                for p in positions:
-                    if p.sl_price or p.trail_price:
-                        pos_map[p.symbol] = {
-                            "sl_price": p.sl_price or 0,
-                            "trail_price": p.trail_price or 0,
-                            "qty": p.qty or 0,
-                        }
-                sl_monitor.update_positions(pos_map)
-            await sl_monitor.start()
-        except Exception as e:
-            logger.error(f"SL monitor failed: {e}")
+    # SL monitor start function (disabled)
+    # Will be enabled after WebSocket connectivity on Railway confirmed
 
     scheduler.start()
     logger.info(f"Scheduler started with {len(strategy_configs)} strategies")
 
-    # Launch SL monitor as background task (non-blocking)
-    # TODO: enable after WebSocket connectivity confirmed
-    # sl_task = asyncio.create_task(_start_sl_monitor())
+    # SL monitor disabled — will enable after WebSocket test on Railway
     sl_task = None
 
     await notifier.send("🟢 Auto Trading Bot started (SL monitor active)")
@@ -220,7 +180,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    await sl_monitor.stop()
+    if sl_monitor:
+        await sl_monitor.stop()
     if sl_task:
         sl_task.cancel()
     scheduler.shutdown()
