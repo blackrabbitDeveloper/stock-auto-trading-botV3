@@ -114,6 +114,7 @@ class OrderExecutor:
 
             if order_result.success:
                 pos.qty = qty
+                pos.status = "active"  # prevent re-buy on redeploy
 
             results.append({
                 "symbol": pos.symbol,
