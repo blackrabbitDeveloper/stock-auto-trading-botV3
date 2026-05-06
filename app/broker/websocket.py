@@ -59,6 +59,7 @@ class StopLossMonitor:
         self._positions: dict[str, dict] = {}  # symbol -> {sl_price, trail_price, qty}
         self._running = False
         self._ws = None
+        self.current_prices: dict[str, int] = {}  # symbol -> latest price (for dashboard)
 
     def update_positions(self, positions: dict[str, dict]):
         """Update monitored positions. Call after signal_job updates trail prices.
@@ -148,6 +149,9 @@ class StopLossMonitor:
 
         symbol = data_fields[0]  # 종목코드
         current_price = int(data_fields[2])  # 체결가 (3번째 필드)
+
+        # Store latest price for dashboard
+        self.current_prices[symbol] = current_price
 
         # Check SL
         if symbol not in self._positions:

@@ -84,6 +84,10 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
     active_positions = [p for p in positions if p.status == "active"]
     pending_sells = [p for p in positions if p.status == "pending_sell"]
 
+    # Get real-time prices from WebSocket monitor
+    sl_monitor = getattr(request.app.state, "sl_monitor", None)
+    current_prices = sl_monitor.current_prices if sl_monitor else {}
+
     # Recent trades
     stmt = select(Trade).order_by(desc(Trade.created_at)).limit(10)
     trades = (await session.execute(stmt)).scalars().all()
@@ -108,6 +112,7 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
         "trades": trades,
         "orders": orders,
         "strategy_summary": strategy_summary,
+        "current_prices": current_prices,
     })
 
 
