@@ -80,7 +80,7 @@ async def lifespan(app: FastAPI):
     order_api = KISOrderAPI(trade_client)
     account_api = KISAccountAPI(trade_client)
     sl_manager = SLManager(order_api)
-    executor = OrderExecutor(order_api, account_api, sl_manager)
+    executor = OrderExecutor(order_api, account_api, sl_manager, strategy_configs)
 
     # Init notifier
     notifier = DiscordNotifier(settings.discord_webhook_url)
@@ -96,45 +96,43 @@ async def lifespan(app: FastAPI):
     market_filter_config = MarketFilterConfig()
     universe_config = UniverseConfig()
 
+    async def _build_sl_pos_map(session) -> dict[str, dict]:
+        """Build position map for SL monitor, excluding skip-period positions."""
+        from app.models.position import Position
+        result = await session.execute(
+            select(Position).where(Position.status == "active")
+        )
+        positions = result.scalars().all()
+        pos_map = {}
+        for p in positions:
+            # Skip positions still in sl_skip_days period
+            config = strategy_configs.get(p.strategy)
+            sl_skip_days = config.sl_skip_days if config else 2
+            if p.holding_days <= sl_skip_days:
+                continue
+            if p.sl_price or p.trail_price:
+                pos_map[p.symbol] = {
+                    "sl_price": p.sl_price or 0,
+                    "trail_price": p.trail_price or 0,
+                    "qty": p.qty or 0,
+                }
+        return pos_map
+
     async def _signal_job():
         async with db_module.async_session_factory() as session:
             await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, real_client)
         # Update SL monitor with latest positions
         async with db_module.async_session_factory() as session:
-            from app.models.position import Position
-            result = await session.execute(
-                select(Position).where(Position.status == "active")
-            )
-            positions = result.scalars().all()
-            pos_map = {}
-            for p in positions:
-                if p.sl_price or p.trail_price:
-                    pos_map[p.symbol] = {
-                        "sl_price": p.sl_price or 0,
-                        "trail_price": p.trail_price or 0,
-                        "qty": p.qty or 0,
-                    }
+            pos_map = await _build_sl_pos_map(session)
             if sl_monitor:
                 sl_monitor.update_positions(pos_map)
 
     async def _order_job():
         async with db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
-        # Update SL monitor with new positions
+        # Update SL monitor (new buys excluded by skip-period filter)
         async with db_module.async_session_factory() as session:
-            from app.models.position import Position
-            result = await session.execute(
-                select(Position).where(Position.status == "active")
-            )
-            positions = result.scalars().all()
-            pos_map = {}
-            for p in positions:
-                if p.sl_price or p.trail_price:
-                    pos_map[p.symbol] = {
-                        "sl_price": p.sl_price or 0,
-                        "trail_price": p.trail_price or 0,
-                        "qty": p.qty or 0,
-                    }
+            pos_map = await _build_sl_pos_map(session)
             if sl_monitor:
                 sl_monitor.update_positions(pos_map)
 
@@ -168,17 +166,26 @@ async def lifespan(app: FastAPI):
                 select(Position).where(Position.symbol == symbol, Position.status == "active")
             )
             pos = result.scalars().first()
-            if pos and pos.qty:
-                sell_result = await order_api.sell_market(pos.symbol, pos.qty)
-                if sell_result.success:
-                    pos.status = "pending_sell"
-                    pos.exit_reason = reason
-                    await session.commit()
-                    await notifier.send(f"🔻 SL HIT: {pos.symbol} {pos.name} | {reason} @ {price:,} | 시장가 매도")
-                    logger.warning(f"SL executed: {symbol} {reason} @ {price}")
-                else:
-                    logger.error(f"SL sell failed for {symbol}: {sell_result.message}")
-                    await notifier.send_error(f"SL sell failed: {symbol} {sell_result.message}")
+            if not pos or not pos.qty:
+                return
+
+            # sl_skip_days 체크: 보유 초기엔 SL 무시 (백테스터와 동일)
+            config = strategy_configs.get(pos.strategy)
+            sl_skip_days = config.sl_skip_days if config else 2
+            if pos.holding_days <= sl_skip_days:
+                logger.info(f"SL skip: {symbol} holding_days={pos.holding_days} <= sl_skip_days={sl_skip_days}")
+                return
+
+            sell_result = await order_api.sell_market(pos.symbol, pos.qty)
+            if sell_result.success:
+                pos.status = "pending_sell"
+                pos.exit_reason = reason
+                await session.commit()
+                await notifier.send(f"🔻 SL HIT: {pos.symbol} {pos.name} | {reason} @ {price:,} | 시장가 매도")
+                logger.warning(f"SL executed: {symbol} {reason} @ {price}")
+            else:
+                logger.error(f"SL sell failed for {symbol}: {sell_result.message}")
+                await notifier.send_error(f"SL sell failed: {symbol} {sell_result.message}")
 
     sl_monitor = StopLossMonitor(real_client.config, _on_sl_hit)
     app.state.sl_monitor = sl_monitor
@@ -187,19 +194,7 @@ async def lifespan(app: FastAPI):
         """Load active positions and start monitoring."""
         try:
             async with db_module.async_session_factory() as session:
-                from app.models.position import Position
-                result = await session.execute(
-                    select(Position).where(Position.status == "active")
-                )
-                positions = result.scalars().all()
-                pos_map = {}
-                for p in positions:
-                    if p.sl_price or p.trail_price:
-                        pos_map[p.symbol] = {
-                            "sl_price": p.sl_price or 0,
-                            "trail_price": p.trail_price or 0,
-                            "qty": p.qty or 0,
-                        }
+                pos_map = await _build_sl_pos_map(session)
                 sl_monitor.update_positions(pos_map)
             await sl_monitor.start()
         except Exception as e:

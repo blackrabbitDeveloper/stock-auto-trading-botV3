@@ -82,8 +82,14 @@ async def run_signal_job(
                 today_high = int(df["high"].iloc[-1])
 
                 pos.holding_days += 1
-                pos.peak_price = max(pos.peak_price or 0, today_high)
-                pos.trail_price = int(pos.peak_price * (1 - config.trailing_stop_pct))
+
+                # Use peak BEFORE today for trail calc (avoid look-ahead bias)
+                # Matches backtester: trail based on peak_before_today
+                peak_before_today = pos.peak_price or 0
+                pos.trail_price = int(peak_before_today * (1 - config.trailing_stop_pct))
+
+                # Update peak with today's high AFTER trail calculation (for next day)
+                pos.peak_price = max(peak_before_today, today_high)
 
                 exit_reason = _check_exit(pos, today_close, config)
                 if exit_reason:

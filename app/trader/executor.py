@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 class OrderExecutor:
     """Orchestrates buy/sell order execution."""
 
-    def __init__(self, order_api: KISOrderAPI, account_api: KISAccountAPI, sl_manager: SLManager):
+    def __init__(self, order_api: KISOrderAPI, account_api: KISAccountAPI, sl_manager: SLManager,
+                 strategy_configs: dict[str, StrategyParams] | None = None):
         self.order_api = order_api
         self.account_api = account_api
         self.sl_manager = sl_manager
+        self.strategy_configs = strategy_configs or {}
 
     async def execute_sells(self, session: AsyncSession) -> list[dict]:
         """Execute all pending sell orders."""
@@ -166,10 +168,15 @@ class OrderExecutor:
                 pos.peak_price = fill.price
                 pos.qty = fill.qty
 
+                # Use strategy config for ATR multiplier (matches backtester)
+                config = self.strategy_configs.get(pos.strategy)
+                atr_mult = config.atr_sl_multiplier if config else 0.5
+                sl_pct = config.stop_loss_pct if config else 0.03
+
                 if pos.entry_atr and pos.entry_atr > 0:
-                    pos.sl_price = int(fill.price - pos.entry_atr * 0.5)
+                    pos.sl_price = int(fill.price - pos.entry_atr * atr_mult)
                 else:
-                    pos.sl_price = int(fill.price * 0.97)
+                    pos.sl_price = int(fill.price * (1 - sl_pct))
 
                 sl_result = await self.sl_manager.register_sl(pos)
                 if sl_result.success:
