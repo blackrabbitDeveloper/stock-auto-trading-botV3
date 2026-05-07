@@ -94,8 +94,9 @@ class OrderExecutor:
             qty = calc_quantity(balance.total_eval, config.capital_allocation, config.position_weight, price)
 
             if qty <= 0:
-                logger.warning(f"Insufficient funds for {pos.symbol}, skipping")
-                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "잔고 부족"})
+                logger.warning(f"Insufficient funds for {pos.symbol}, removing from pending")
+                await session.delete(pos)
+                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "잔고 부족 (삭제)"})
                 continue
 
             await asyncio.sleep(1.0)  # rate limit protection
