@@ -61,12 +61,41 @@ class StopLossMonitor:
         self._ws = None
         self.current_prices: dict[str, int] = {}  # symbol -> latest price (for dashboard)
 
-    def update_positions(self, positions: dict[str, dict]):
+    async def update_positions(self, positions: dict[str, dict]):
         """Update monitored positions. Call after signal_job updates trail prices.
 
         positions: {symbol: {"sl_price": int, "trail_price": int, "qty": int}}
+        Subscribes to new symbols on the active WebSocket connection.
         """
+        old_symbols = set(self._positions.keys())
+        new_symbols = set(positions.keys()) - old_symbols
         self._positions = positions
+
+        # Subscribe to newly added symbols on the live WebSocket
+        if new_symbols and self._ws:
+            try:
+                approval_key = await get_approval_key(self.config)
+                for symbol in new_symbols:
+                    request = {
+                        "header": {
+                            "approval_key": approval_key,
+                            "custtype": "P",
+                            "tr_type": "1",
+                            "content-type": "utf-8",
+                        },
+                        "body": {
+                            "input": {
+                                "tr_id": "H0STCNT0",
+                                "tr_key": symbol,
+                            }
+                        },
+                    }
+                    await self._ws.send(json.dumps(request))
+                    await asyncio.sleep(0.1)
+                logger.info(f"Subscribed to {len(new_symbols)} new symbols: {new_symbols}")
+            except Exception as e:
+                logger.error(f"Failed to subscribe new symbols: {e}")
+
         logger.info(f"SL monitor: watching {len(positions)} positions")
 
     async def start(self):

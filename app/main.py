@@ -125,7 +125,7 @@ async def lifespan(app: FastAPI):
         async with db_module.async_session_factory() as session:
             pos_map = await _build_sl_pos_map(session)
             if sl_monitor:
-                sl_monitor.update_positions(pos_map)
+                await sl_monitor.update_positions(pos_map)
 
     async def _order_job():
         async with db_module.async_session_factory() as session:
@@ -134,7 +134,7 @@ async def lifespan(app: FastAPI):
         async with db_module.async_session_factory() as session:
             pos_map = await _build_sl_pos_map(session)
             if sl_monitor:
-                sl_monitor.update_positions(pos_map)
+                await sl_monitor.update_positions(pos_map)
 
     async def _confirm_job():
         async with db_module.async_session_factory() as session:
@@ -184,10 +184,13 @@ async def lifespan(app: FastAPI):
                 else:
                     logger.warning(f"SL cancel failed for {symbol}: {cancel_result.message}")
 
-            sell_result = await order_api.sell_market(pos.symbol, pos.qty)
+            sell_qty = pos.qty
+            sell_result = await order_api.sell_market(pos.symbol, sell_qty)
             if sell_result.success:
                 pos.status = "pending_sell"
                 pos.exit_reason = reason
+                pos.qty = 0  # prevent double-sell by order_job
+                pos.sl_order_no = None  # already cancelled above
                 await session.commit()
                 await notifier.send(f"🔻 SL HIT: {pos.symbol} {pos.name} | {reason} @ {price:,} | 시장가 매도")
                 logger.warning(f"SL executed: {symbol} {reason} @ {price}")
@@ -203,7 +206,7 @@ async def lifespan(app: FastAPI):
         try:
             async with db_module.async_session_factory() as session:
                 pos_map = await _build_sl_pos_map(session)
-                sl_monitor.update_positions(pos_map)
+                await sl_monitor.update_positions(pos_map)
             await sl_monitor.start()
         except Exception as e:
             logger.error(f"SL monitor error: {e}")
