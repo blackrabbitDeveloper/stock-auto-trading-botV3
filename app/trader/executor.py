@@ -38,6 +38,21 @@ class OrderExecutor:
         results = []
 
         for pos in positions:
+            # Validate qty
+            if not pos.qty or pos.qty <= 0:
+                logger.warning(f"Skipping sell for {pos.symbol}: qty={pos.qty}")
+                await session.delete(pos)
+                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "수량 없음 (삭제)"})
+                continue
+
+            # Cancel broker-side SL order before selling
+            if pos.sl_order_no:
+                cancel_result = await self.order_api.cancel_order(pos.sl_order_no, pos.qty)
+                if cancel_result.success:
+                    logger.info(f"SL order cancelled for {pos.symbol}: {pos.sl_order_no}")
+                else:
+                    logger.warning(f"SL cancel failed for {pos.symbol}: {cancel_result.message}")
+
             await asyncio.sleep(1.0)  # rate limit protection
             order_result = await self.order_api.sell_market(pos.symbol, pos.qty)
 
@@ -75,6 +90,7 @@ class OrderExecutor:
         results = []
 
         balance = await self.account_api.get_balance()
+        spent = 0  # Track spent amount to avoid over-allocation
 
         for pos in positions:
             config = strategy_configs.get(pos.strategy)
@@ -91,7 +107,8 @@ class OrderExecutor:
                 logger.warning(f"Cannot estimate price for {pos.symbol}, skipping")
                 results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "가격 추정 불가"})
                 continue
-            qty = calc_quantity(balance.total_eval, config.capital_allocation, config.position_weight, price)
+            available_eval = balance.total_eval - spent
+            qty = calc_quantity(available_eval, config.capital_allocation, config.position_weight, price)
 
             if qty <= 0:
                 logger.warning(f"Insufficient funds for {pos.symbol}, removing from pending")
@@ -116,6 +133,7 @@ class OrderExecutor:
             session.add(order)
 
             if order_result.success:
+                spent += qty * price  # Track spent for next position
                 pos.qty = qty
                 pos.status = "active"  # prevent re-buy on redeploy
                 pos.entry_price = price
@@ -182,6 +200,16 @@ class OrderExecutor:
                 sl_result = await self.sl_manager.register_sl(pos)
                 if sl_result.success:
                     pos.sl_order_no = sl_result.order_no
+                else:
+                    # SL 등록 실패 → 즉시 시장가 매도로 안전하게 청산
+                    logger.error(f"SL registration FAILED for {pos.symbol}, selling immediately")
+                    sell_back = await self.order_api.sell_market(pos.symbol, pos.qty)
+                    if sell_back.success:
+                        pos.status = "pending_sell"
+                        pos.exit_reason = "sl_register_fail"
+                    else:
+                        logger.error(f"Emergency sell also failed for {pos.symbol}: {sell_back.message}")
+                        # Position stays active but without SL — will be caught by signal_job
 
                 results.append({
                     "type": "buy_filled",

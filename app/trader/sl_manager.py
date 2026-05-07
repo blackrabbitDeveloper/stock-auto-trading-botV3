@@ -31,7 +31,8 @@ class SLManager:
         if position.sl_order_no:
             cancel_result = await self.order_api.cancel_order(position.sl_order_no, position.qty)
             if not cancel_result.success:
-                logger.warning(f"Failed to cancel old SL for {position.symbol}: {cancel_result.message}")
+                logger.error(f"Failed to cancel old SL for {position.symbol}: {cancel_result.message}")
+                return OrderResult(success=False, message=f"SL cancel failed: {cancel_result.message}")
 
         result = await self.order_api.set_stop_loss(
             position.symbol, position.qty, new_sl_price

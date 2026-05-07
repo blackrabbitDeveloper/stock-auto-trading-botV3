@@ -176,6 +176,14 @@ async def lifespan(app: FastAPI):
                 logger.info(f"SL skip: {symbol} holding_days={pos.holding_days} <= sl_skip_days={sl_skip_days}")
                 return
 
+            # Cancel broker-side SL order before market sell
+            if pos.sl_order_no:
+                cancel_result = await order_api.cancel_order(pos.sl_order_no, pos.qty)
+                if cancel_result.success:
+                    logger.info(f"SL order cancelled for {symbol}: {pos.sl_order_no}")
+                else:
+                    logger.warning(f"SL cancel failed for {symbol}: {cancel_result.message}")
+
             sell_result = await order_api.sell_market(pos.symbol, pos.qty)
             if sell_result.success:
                 pos.status = "pending_sell"

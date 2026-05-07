@@ -74,9 +74,15 @@ class StrategyParams(BaseModel):
     max_return_5d: float = 0.20
     trailing_stop_pct: float = 0.05
     stop_loss_pct: float = 0.03
+    take_profit_pct: float = 0.10
+    atr_sl_enabled: bool = True
     atr_sl_multiplier: float = 0.5
     sl_skip_days: int = 2
     max_holding_days: int = 10
+    exit_method: str = "trailing_stop"  # "fixed", "trailing_stop", "ma_exit"
+    ma_exit_period: int = 5
+    dynamic_holding: bool = False
+    breakeven_stop: bool = False
 
 
 class MarketFilterConfig(BaseModel):

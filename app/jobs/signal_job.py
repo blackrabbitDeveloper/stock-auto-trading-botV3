@@ -80,18 +80,23 @@ async def run_signal_job(
 
                 today_close = int(df["close"].iloc[-1])
                 today_high = int(df["high"].iloc[-1])
+                today_low = int(df["low"].iloc[-1])
 
                 pos.holding_days += 1
 
+                # sl_skip_days: still update peak but skip exit check
+                if pos.holding_days <= config.sl_skip_days:
+                    pos.peak_price = max(pos.peak_price or 0, today_high)
+                    continue
+
                 # Use peak BEFORE today for trail calc (avoid look-ahead bias)
-                # Matches backtester: trail based on peak_before_today
                 peak_before_today = pos.peak_price or 0
                 pos.trail_price = int(peak_before_today * (1 - config.trailing_stop_pct))
 
-                # Update peak with today's high AFTER trail calculation (for next day)
+                # Update peak with today's high AFTER trail calculation
                 pos.peak_price = max(peak_before_today, today_high)
 
-                exit_reason = _check_exit(pos, today_close, config)
+                exit_reason = _check_exit(pos, today_close, today_low, df, config)
                 if exit_reason:
                     pos.status = "pending_sell"
                     pos.exit_reason = exit_reason
@@ -231,23 +236,62 @@ async def _check_market_filter_api(market_api: KISMarketAPI, config: MarketFilte
         return True
 
 
-def _check_exit(pos: Position, today_close: int, config: StrategyParams) -> str | None:
-    """Check exit conditions using max(sl, trail) single trigger."""
-    if pos.holding_days <= config.sl_skip_days:
-        return None
+def _check_exit(pos: Position, today_close: int, today_low: int,
+                 df: pd.DataFrame, config: StrategyParams) -> str | None:
+    """Check exit conditions matching backtester logic.
 
+    Supports exit_method: "trailing_stop", "ma_exit", "fixed".
+    """
     sl_price = pos.sl_price or 0
-    trail_price = pos.trail_price or 0
 
-    # MAX(SL, Trail) — matches real trading with single reservation order
-    exit_trigger = max(sl_price, trail_price)
+    # Breakeven stop: raise SL to entry price when profitable
+    if config.breakeven_stop and pos.entry_price and today_close > pos.entry_price:
+        sl_price = max(sl_price, pos.entry_price)
 
-    if exit_trigger > 0 and today_close <= exit_trigger:
-        if trail_price > sl_price:
-            return "trailing_stop"
-        return "stop_loss"
+    exit_method = config.exit_method
 
-    if pos.holding_days >= config.max_holding_days:
-        return "time_exit"
+    if exit_method == "trailing_stop":
+        trail_price = pos.trail_price or 0
+        exit_trigger = max(sl_price, trail_price)
+
+        if exit_trigger > 0 and today_low <= exit_trigger:
+            if trail_price > sl_price:
+                return "trailing_stop"
+            if sl_price >= (pos.entry_price or 0):
+                return "breakeven"
+            return "stop_loss"
+
+        if pos.holding_days >= config.max_holding_days:
+            if config.dynamic_holding and pos.entry_price and today_close > pos.entry_price:
+                return None  # profitable → let trailing stop manage
+            return "time_exit"
+
+    elif exit_method == "ma_exit":
+        if sl_price > 0 and today_low <= sl_price:
+            if sl_price >= (pos.entry_price or 0):
+                return "breakeven"
+            return "stop_loss"
+
+        ma_col = f"ma{config.ma_exit_period}"
+        if ma_col in df.columns:
+            ma_value = df[ma_col].iloc[-1]
+            if pd.notna(ma_value) and today_close < ma_value:
+                return "ma_exit"
+
+        if pos.holding_days >= config.max_holding_days:
+            return "time_exit"
+
+    else:  # "fixed"
+        if sl_price > 0 and today_low <= sl_price:
+            if sl_price >= (pos.entry_price or 0):
+                return "breakeven"
+            return "stop_loss"
+
+        tp_price = (pos.entry_price or 0) * (1 + config.take_profit_pct)
+        if tp_price > 0 and today_close >= tp_price:
+            return "take_profit"
+
+        if pos.holding_days >= config.max_holding_days:
+            return "time_exit"
 
     return None
