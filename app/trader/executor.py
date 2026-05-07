@@ -192,7 +192,8 @@ class OrderExecutor:
                 atr_mult = config.atr_sl_multiplier if config else 0.5
                 sl_pct = config.stop_loss_pct if config else 0.03
 
-                if pos.entry_atr and pos.entry_atr > 0:
+                atr_enabled = config.atr_sl_enabled if config else True
+                if atr_enabled and pos.entry_atr and pos.entry_atr > 0:
                     pos.sl_price = int(fill.price - pos.entry_atr * atr_mult)
                 else:
                     pos.sl_price = int(fill.price * (1 - sl_pct))

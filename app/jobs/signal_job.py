@@ -82,11 +82,11 @@ async def run_signal_job(
                 today_high = int(df["high"].iloc[-1])
                 today_low = int(df["low"].iloc[-1])
 
-                pos.holding_days += 1
-
                 # sl_skip_days: still update peak but skip exit check
+                # Increment holding_days AFTER check (matches backtester)
                 if pos.holding_days <= config.sl_skip_days:
                     pos.peak_price = max(pos.peak_price or 0, today_high)
+                    pos.holding_days += 1
                     continue
 
                 # Use peak BEFORE today for trail calc (avoid look-ahead bias)
@@ -96,7 +96,12 @@ async def run_signal_job(
                 # Update peak with today's high AFTER trail calculation
                 pos.peak_price = max(peak_before_today, today_high)
 
-                exit_reason = _check_exit(pos, today_close, today_low, df, config)
+                # Breakeven stop: persist elevated SL to DB for WebSocket monitor
+                if config.breakeven_stop and pos.entry_price and today_close > pos.entry_price:
+                    if (pos.sl_price or 0) < pos.entry_price:
+                        pos.sl_price = pos.entry_price
+
+                exit_reason = _check_exit(pos, today_close, today_high, today_low, df, config)
                 if exit_reason:
                     pos.status = "pending_sell"
                     pos.exit_reason = exit_reason
@@ -106,6 +111,8 @@ async def run_signal_job(
                         "exit_reason": exit_reason,
                         "return_pct": (today_close / pos.entry_price - 1) if pos.entry_price else 0,
                     })
+
+                pos.holding_days += 1
             except Exception as e:
                 logger.error(f"Exit check failed for {pos.symbol}: {e}")
 
@@ -179,7 +186,7 @@ async def run_signal_job(
         logger.info(f"[{strategy_name}] {len(candidates)} signals generated")
 
         for c in candidates[:available_slots]:
-            sl_price = int(c["close"] - c["entry_atr"] * config.atr_sl_multiplier) if c["entry_atr"] > 0 else int(c["close"] * (1 - config.stop_loss_pct))
+            sl_price = int(c["close"] - c["entry_atr"] * config.atr_sl_multiplier) if config.atr_sl_enabled and c["entry_atr"] > 0 else int(c["close"] * (1 - config.stop_loss_pct))
 
             pos = Position(
                 strategy=strategy_name,
@@ -236,18 +243,14 @@ async def _check_market_filter_api(market_api: KISMarketAPI, config: MarketFilte
         return True
 
 
-def _check_exit(pos: Position, today_close: int, today_low: int,
+def _check_exit(pos: Position, today_close: int, today_high: int, today_low: int,
                  df: pd.DataFrame, config: StrategyParams) -> str | None:
     """Check exit conditions matching backtester logic.
 
     Supports exit_method: "trailing_stop", "ma_exit", "fixed".
+    Breakeven SL adjustment is done in the caller (persisted to DB for WebSocket).
     """
     sl_price = pos.sl_price or 0
-
-    # Breakeven stop: raise SL to entry price when profitable
-    if config.breakeven_stop and pos.entry_price and today_close > pos.entry_price:
-        sl_price = max(sl_price, pos.entry_price)
-
     exit_method = config.exit_method
 
     if exit_method == "trailing_stop":
@@ -272,11 +275,10 @@ def _check_exit(pos: Position, today_close: int, today_low: int,
                 return "breakeven"
             return "stop_loss"
 
-        ma_col = f"ma{config.ma_exit_period}"
-        if ma_col in df.columns:
-            ma_value = df[ma_col].iloc[-1]
-            if pd.notna(ma_value) and today_close < ma_value:
-                return "ma_exit"
+        # Compute MA inline (raw OHLCV has no indicator columns)
+        ma_value = df["close"].rolling(config.ma_exit_period).mean().iloc[-1]
+        if pd.notna(ma_value) and today_close < ma_value:
+            return "ma_exit"
 
         if pos.holding_days >= config.max_holding_days:
             return "time_exit"
@@ -288,7 +290,7 @@ def _check_exit(pos: Position, today_close: int, today_low: int,
             return "stop_loss"
 
         tp_price = (pos.entry_price or 0) * (1 + config.take_profit_pct)
-        if tp_price > 0 and today_close >= tp_price:
+        if tp_price > 0 and today_high >= tp_price:
             return "take_profit"
 
         if pos.holding_days >= config.max_holding_days:
