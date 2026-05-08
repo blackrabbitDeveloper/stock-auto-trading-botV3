@@ -154,15 +154,34 @@ class OrderExecutor:
         await session.commit()
         return results
 
-    async def confirm_fills(self, session: AsyncSession, today: str) -> list[dict]:
-        """Check fills and update positions."""
-        filled_orders = await self.account_api.get_filled_orders(today)
+    async def confirm_fills(self, session: AsyncSession, today: str, lookback_days: int = 2) -> list[dict]:
+        """Check fills and update positions. Looks back multiple days to catch missed fills."""
+        from datetime import datetime, timedelta
+
+        all_filled = []
+        base_date = datetime.strptime(today, "%Y-%m-%d")
+        for i in range(lookback_days):
+            query_date = (base_date - timedelta(days=i)).strftime("%Y-%m-%d")
+            try:
+                fills = await self.account_api.get_filled_orders(query_date)
+                all_filled.extend(fills)
+            except Exception as e:
+                logger.warning(f"Failed to query fills for {query_date}: {e}")
+
+        # Deduplicate by order_no
+        seen = set()
+        filled_orders = []
+        for f in all_filled:
+            if f.order_no not in seen:
+                seen.add(f.order_no)
+                filled_orders.append(f)
+
         results = []
 
         stmt = select(Order).where(Order.status == "submitted")
         db_orders = (await session.execute(stmt)).scalars().all()
 
-        logger.info(f"Confirm: {len(filled_orders)} fills from API, {len(db_orders)} submitted orders in DB")
+        logger.info(f"Confirm: {len(filled_orders)} fills from API (lookback={lookback_days}d), {len(db_orders)} submitted orders in DB")
         if filled_orders:
             logger.info(f"API fills: {[(f.order_no, f.symbol, f.qty) for f in filled_orders[:5]]}")
         if db_orders:
