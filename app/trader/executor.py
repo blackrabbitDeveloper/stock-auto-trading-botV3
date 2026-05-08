@@ -136,9 +136,9 @@ class OrderExecutor:
                 spent += qty * price  # Track spent for next position
                 pos.qty = qty
                 pos.status = "active"  # prevent re-buy on redeploy
-                pos.entry_price = price
                 pos.entry_date = date.today()
-                pos.peak_price = price
+                # entry_price, peak_price are set by confirm_fills() with actual fill price
+                # Do NOT set them here — the estimated price can differ significantly
 
             results.append({
                 "symbol": pos.symbol,
