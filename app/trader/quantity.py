@@ -19,4 +19,7 @@ def calc_quantity(total_eval: int, capital_allocation: float, position_weight: f
         return 0
     budget = total_eval * capital_allocation * position_weight
     qty = math.floor(budget / price)
+    # Allow at least 1 share if within strategy capital allocation
+    if qty == 0 and price <= total_eval * capital_allocation:
+        qty = 1
     return max(0, qty)
