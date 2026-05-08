@@ -25,31 +25,54 @@ def verify_token(request: Request):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def _get_account_info(request: Request) -> dict:
-    """Fetch account info using the trading client from app state."""
-    try:
-        from app.broker.account import KISAccountAPI
+async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
+    """Fetch account info and per-stock prices from balance API.
 
-        # Use the trade_client from app.state (paper or real depending on KIS_ENV)
+    Returns (account_info, api_prices) where api_prices maps symbol -> current price.
+    """
+    try:
         trade_client = getattr(request.app.state, "trade_client", None)
         if not trade_client:
             raise RuntimeError("trade_client not initialized")
 
-        account_api = KISAccountAPI(trade_client)
-        balance = await account_api.get_balance()
-
         kis_config = KISConfig()
         env = kis_config.env
+        tr_id = "VTTC8434R" if env == "paper" else "TTTC8434R"
+
+        data = await trade_client.request("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", tr_id, params={
+            "CANO": trade_client.config.account_prefix,
+            "ACNT_PRDT_CD": trade_client.config.account_suffix,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        })
+
+        output2 = data.get("output2", [{}])
+        summary = output2[0] if output2 else {}
+
+        # Extract per-stock current prices from output1
+        api_prices = {}
+        for item in data.get("output1", []):
+            symbol = item.get("pdno", "")
+            price = int(item.get("prpr", 0))
+            if symbol and price > 0:
+                api_prices[symbol] = price
 
         return {
             "env": env,
             "env_label": "모의투자" if env == "paper" else "실전",
             "account_no": trade_client.config.account_no,
-            "total_eval": balance.total_eval,
-            "cash": balance.cash,
-            "stock_eval": balance.stock_eval,
-            "pnl_today": balance.pnl_today,
-        }
+            "total_eval": int(summary.get("tot_evlu_amt", 0)),
+            "cash": int(summary.get("dnca_tot_amt", 0)),
+            "stock_eval": int(summary.get("scts_evlu_amt", 0)),
+            "pnl_today": int(summary.get("evlu_pfls_smtl_amt", 0)),
+        }, api_prices
     except Exception as e:
         kis_config = KISConfig()
         return {
@@ -61,7 +84,7 @@ async def _get_account_info(request: Request) -> dict:
             "stock_eval": 0,
             "pnl_today": 0,
             "error": str(e),
-        }
+        }, {}
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -72,8 +95,8 @@ async def index(request: Request):
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
-    # Account info
-    account = await _get_account_info(request)
+    # Account info + API prices (fallback for after-hours)
+    account, api_prices = await _get_account_info(request)
 
     # Active positions
     stmt = select(Position).where(Position.status.in_(["active", "pending_buy", "pending_sell"])).order_by(Position.strategy)
@@ -84,9 +107,10 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
     active_positions = [p for p in positions if p.status == "active"]
     pending_sells = [p for p in positions if p.status == "pending_sell"]
 
-    # Get real-time prices from WebSocket monitor
+    # Merge prices: WebSocket (real-time) > API (fallback for after-hours)
     sl_monitor = getattr(request.app.state, "sl_monitor", None)
-    current_prices = sl_monitor.current_prices if sl_monitor else {}
+    ws_prices = sl_monitor.current_prices if sl_monitor else {}
+    current_prices = {**api_prices, **ws_prices}  # WS overrides API
 
     # Recent trades
     stmt = select(Trade).order_by(desc(Trade.created_at)).limit(10)
