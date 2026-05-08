@@ -170,7 +170,11 @@ async def lifespan(app: FastAPI):
                 select(Position).where(Position.symbol == symbol, Position.status == "active")
             )
             pos = result.scalars().first()
-            if not pos or not pos.qty:
+            if not pos:
+                logger.info(f"SL hit for {symbol} but no active position found (already sold?)")
+                return
+            if not pos.qty or pos.qty <= 0:
+                logger.info(f"SL hit for {symbol} but qty=0 (already sold by order_job?)")
                 return
 
             # sl_skip_days 체크: 보유 초기엔 SL 무시 (백테스터와 동일)
@@ -179,6 +183,11 @@ async def lifespan(app: FastAPI):
             if pos.holding_days <= sl_skip_days:
                 logger.info(f"SL skip: {symbol} holding_days={pos.holding_days} <= sl_skip_days={sl_skip_days}")
                 return
+
+            # Mark as pending_sell FIRST to prevent order_job from also selling
+            pos.status = "pending_sell"
+            pos.exit_reason = reason
+            await session.flush()
 
             # Cancel broker-side SL order before market sell
             if pos.sl_order_no:
@@ -191,14 +200,16 @@ async def lifespan(app: FastAPI):
             sell_qty = pos.qty
             sell_result = await order_api.sell_market(pos.symbol, sell_qty)
             if sell_result.success:
-                pos.status = "pending_sell"
-                pos.exit_reason = reason
                 pos.qty = 0  # prevent double-sell by order_job
-                pos.sl_order_no = None  # already cancelled above
+                pos.sl_order_no = None
                 await session.commit()
                 await notifier.send(f"🔻 SL HIT: {pos.symbol} {pos.name} | {reason} @ {price:,} | 시장가 매도")
                 logger.warning(f"SL executed: {symbol} {reason} @ {price}")
             else:
+                # Rollback status change — let order_job retry
+                pos.status = "active"
+                pos.exit_reason = None
+                await session.commit()
                 logger.error(f"SL sell failed for {symbol}: {sell_result.message}")
                 await notifier.send_error(f"SL sell failed: {symbol} {sell_result.message}")
 
