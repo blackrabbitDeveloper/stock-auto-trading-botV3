@@ -23,11 +23,13 @@ class OrderExecutor:
     """Orchestrates buy/sell order execution."""
 
     def __init__(self, order_api: KISOrderAPI, account_api: KISAccountAPI, sl_manager: SLManager,
-                 strategy_configs: dict[str, StrategyParams] | None = None):
+                 strategy_configs: dict[str, StrategyParams] | None = None,
+                 notifier=None):
         self.order_api = order_api
         self.account_api = account_api
         self.sl_manager = sl_manager
         self.strategy_configs = strategy_configs or {}
+        self.notifier = notifier
 
     async def execute_sells(self, session: AsyncSession) -> list[dict]:
         """Execute all pending sell orders."""
@@ -204,13 +206,21 @@ class OrderExecutor:
                 else:
                     # SL 등록 실패 → 즉시 시장가 매도로 안전하게 청산
                     logger.error(f"SL registration FAILED for {pos.symbol}, selling immediately")
+                    if self.notifier:
+                        await self.notifier.send_error(
+                            f"⚠️ SL 등록 실패 → 긴급 매도: {pos.symbol} {pos.name}"
+                        )
                     sell_back = await self.order_api.sell_market(pos.symbol, pos.qty)
                     if sell_back.success:
                         pos.status = "pending_sell"
                         pos.exit_reason = "sl_register_fail"
                     else:
                         logger.error(f"Emergency sell also failed for {pos.symbol}: {sell_back.message}")
-                        # Position stays active but without SL — will be caught by signal_job
+                        if self.notifier:
+                            await self.notifier.send_error(
+                                f"🚨 위험: {pos.symbol} {pos.name} SL 등록 실패 + 긴급 매도 실패! "
+                                f"수동 매도 필요! qty={pos.qty}"
+                            )
 
                 results.append({
                     "type": "buy_filled",

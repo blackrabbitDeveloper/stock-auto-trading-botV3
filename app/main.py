@@ -80,10 +80,11 @@ async def lifespan(app: FastAPI):
     order_api = KISOrderAPI(trade_client)
     account_api = KISAccountAPI(trade_client)
     sl_manager = SLManager(order_api)
-    executor = OrderExecutor(order_api, account_api, sl_manager, strategy_configs)
 
     # Init notifier
     notifier = DiscordNotifier(settings.discord_webhook_url)
+
+    executor = OrderExecutor(order_api, account_api, sl_manager, strategy_configs, notifier)
 
     # Store in app state
     app.state.real_client = real_client
