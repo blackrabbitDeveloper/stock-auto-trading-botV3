@@ -97,7 +97,11 @@ async def lifespan(app: FastAPI):
     universe_config = UniverseConfig()
 
     async def _build_sl_pos_map(session) -> dict[str, dict]:
-        """Build position map for SL monitor, excluding skip-period positions."""
+        """Build position map for SL monitor (all active positions).
+
+        Note: sl_skip_days filtering is handled in _on_sl_hit callback,
+        so all active positions are subscribed for real-time price tracking.
+        """
         from app.models.position import Position
         result = await session.execute(
             select(Position).where(Position.status == "active")
@@ -105,17 +109,11 @@ async def lifespan(app: FastAPI):
         positions = result.scalars().all()
         pos_map = {}
         for p in positions:
-            # Skip positions still in sl_skip_days period
-            config = strategy_configs.get(p.strategy)
-            sl_skip_days = config.sl_skip_days if config else 2
-            if p.holding_days <= sl_skip_days:
-                continue
-            if p.sl_price or p.trail_price:
-                pos_map[p.symbol] = {
-                    "sl_price": p.sl_price or 0,
-                    "trail_price": p.trail_price or 0,
-                    "qty": p.qty or 0,
-                }
+            pos_map[p.symbol] = {
+                "sl_price": p.sl_price or 0,
+                "trail_price": p.trail_price or 0,
+                "qty": p.qty or 0,
+            }
         return pos_map
 
     async def _signal_job():
@@ -130,7 +128,7 @@ async def lifespan(app: FastAPI):
     async def _order_job():
         async with db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
-        # Update SL monitor (new buys excluded by skip-period filter)
+        # Update SL monitor with newly bought positions
         async with db_module.async_session_factory() as session:
             pos_map = await _build_sl_pos_map(session)
             if sl_monitor:
@@ -139,6 +137,11 @@ async def lifespan(app: FastAPI):
     async def _confirm_job():
         async with db_module.async_session_factory() as session:
             await run_confirm_job(session, executor, notifier)
+        # Update SL monitor after confirm (sl_price now set from actual fill price)
+        async with db_module.async_session_factory() as session:
+            pos_map = await _build_sl_pos_map(session)
+            if sl_monitor:
+                await sl_monitor.update_positions(pos_map)
 
     async def _refresh_token():
         try:
