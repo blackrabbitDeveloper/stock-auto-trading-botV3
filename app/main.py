@@ -313,3 +313,61 @@ async def remove_position(position_id: int, request: Request, session: AsyncSess
     await session.delete(pos)
     await session.commit()
     return {"status": "ok", "removed": f"{symbol} {name}"}
+
+
+@app.post("/sync-prices")
+async def sync_prices(request: Request, session: AsyncSession = Depends(get_session)):
+    """잔고조회 API에서 매입평균가를 가져와 active 포지션의 entry_price를 갱신."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from app.broker.account import KISAccountAPI
+
+    trade_client = getattr(request.app.state, "trade_client", None)
+    if not trade_client:
+        return {"error": "trade_client not initialized"}
+
+    account_api = KISAccountAPI(trade_client)
+    env = trade_client.config.env
+    tr_id = "VTTC8434R" if env == "paper" else "TTTC8434R"
+
+    data = await trade_client.request("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", tr_id, params={
+        "CANO": trade_client.config.account_prefix,
+        "ACNT_PRDT_CD": trade_client.config.account_suffix,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "00",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    })
+
+    holdings = {}
+    for item in data.get("output1", []):
+        symbol = item.get("pdno", "")
+        avg_price = int(float(item.get("pchs_avg_pric", "0")))
+        if symbol and avg_price > 0:
+            holdings[symbol] = avg_price
+
+    stmt = select(Position).where(Position.status == "active")
+    positions = (await session.execute(stmt)).scalars().all()
+
+    updated = []
+    for pos in positions:
+        if pos.symbol in holdings:
+            old_price = pos.entry_price
+            new_price = holdings[pos.symbol]
+            if old_price != new_price:
+                pos.entry_price = new_price
+                pos.peak_price = max(pos.peak_price or 0, new_price)
+                updated.append(f"{pos.symbol} {pos.name}: {old_price:,} -> {new_price:,}")
+
+    await session.commit()
+    return {"status": "ok", "updated": len(updated), "details": updated}
