@@ -326,6 +326,7 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
             raise HTTPException(status_code=401, detail="Unauthorized")
 
     from app.broker.account import KISAccountAPI
+    from app.models.position import Position
 
     trade_client = getattr(request.app.state, "trade_client", None)
     if not trade_client:
