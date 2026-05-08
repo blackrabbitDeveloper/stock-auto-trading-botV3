@@ -73,6 +73,10 @@ async def run_signal_job(
         active_positions = (await session.execute(stmt)).scalars().all()
 
         for pos in active_positions:
+            if not pos.entry_price:
+                logger.warning(f"Skipping exit check for {pos.symbol}: entry_price not confirmed yet")
+                continue
+
             try:
                 df = await market_api.get_daily_ohlcv(pos.symbol)
                 if df.empty:
