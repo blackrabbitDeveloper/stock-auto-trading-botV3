@@ -216,7 +216,7 @@ async def lifespan(app: FastAPI):
 
     async def _on_sl_hit(symbol: str, price: int, reason: str):
         """Callback when SL/trail is hit — immediately sell."""
-        from datetime import time as dt_time
+        from datetime import datetime, time as dt_time
         from zoneinfo import ZoneInfo
         now_kst = datetime.now(ZoneInfo("Asia/Seoul")).time()
         if not (dt_time(9, 0) <= now_kst <= dt_time(15, 20)):

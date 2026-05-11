@@ -79,12 +79,19 @@ async def run_stale_order_cleanup(
             else:
                 cleaned.append(f"  {order.symbol}: 주문 취소 (포지션 유지)")
         elif order.side == "sell" and order.position_id:
-            # 매도 미체결 → 포지션을 active로 복구 (다음날 재시도)
+            # 매도 미체결 → 포지션 상태 확인 후 처리
             pos = await session.get(Position, order.position_id)
             if pos and pos.status == "pending_sell":
-                pos.status = "active"
-                pos.exit_reason = None
-                cleaned.append(f"  {order.symbol}: 매도 취소 → 포지션 active 복구")
+                if pos.qty and pos.qty > 0:
+                    # 실제 보유 중 → active 복구 (다음날 재시도)
+                    pos.status = "active"
+                    pos.exit_reason = None
+                    cleaned.append(f"  {order.symbol}: 매도 취소 → 포지션 active 복구")
+                else:
+                    # SL 모니터가 이미 매도 (qty=0) → 수동 확인 필요
+                    pos.exit_reason = "sl_sell_unconfirmed"
+                    cleaned.append(f"  {order.symbol}: SL 매도 미확인 — 수동 확인 필요")
+                    await notifier.send_error(f"⚠️ {order.symbol} SL 매도 체결 미확인 — 브로커에서 수동 확인 필요")
             else:
                 cleaned.append(f"  {order.symbol}: 매도 주문 취소")
         else:

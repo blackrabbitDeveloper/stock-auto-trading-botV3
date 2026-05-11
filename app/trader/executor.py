@@ -215,10 +215,10 @@ class OrderExecutor:
                 continue
 
             try:
-                await self._process_fill(session, db_order, fill, results)
+                async with session.begin_nested():
+                    await self._process_fill(session, db_order, fill, results)
             except Exception as e:
                 logger.error(f"Fill processing failed for {db_order.symbol} order={db_order.order_no}: {e}")
-                await session.rollback()
 
         await session.commit()
         return results
@@ -288,6 +288,11 @@ class OrderExecutor:
                 exit_reason=pos.exit_reason or "manual",
             )
             session.add(trade)
+            # FK 제약 해제 후 포지션 삭제
+            from sqlalchemy import update
+            await session.execute(
+                update(Order).where(Order.position_id == pos.id).values(position_id=None)
+            )
             await session.delete(pos)
 
             results.append({
