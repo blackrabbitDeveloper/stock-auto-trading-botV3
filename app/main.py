@@ -201,6 +201,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
     scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=30), id="confirm_job_retry", misfire_grace_time=60)
     scheduler.add_job(_refresh_token, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="token_refresh")
+    scheduler.add_job(_refresh_token, CronTrigger(day_of_week="mon-fri", hour=20, minute=0), id="token_refresh_evening")
 
     async def _stale_order_cleanup():
         if not _is_trading_day():
@@ -215,6 +216,12 @@ async def lifespan(app: FastAPI):
 
     async def _on_sl_hit(symbol: str, price: int, reason: str):
         """Callback when SL/trail is hit — immediately sell."""
+        from datetime import time as dt_time
+        from zoneinfo import ZoneInfo
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul")).time()
+        if not (dt_time(9, 0) <= now_kst <= dt_time(15, 20)):
+            logger.info(f"SL hit for {symbol} ignored — outside market hours ({now_kst})")
+            return
         async with sell_lock, db_module.async_session_factory() as session:
             from app.models.position import Position
             result = await session.execute(
@@ -271,12 +278,20 @@ async def lifespan(app: FastAPI):
                 logger.error(f"SL sell failed for {symbol}: {sell_result.message}")
                 await notifier.send_error(f"SL sell failed: {symbol} {sell_result.message}")
 
-    sl_monitor = StopLossMonitor(real_client.config, _on_sl_hit)
+    # WS 환경을 거래 클라이언트와 일치시킴 (paper↔real 불일치 방지)
+    sl_monitor = StopLossMonitor(trade_client.config, _on_sl_hit)
     app.state.sl_monitor = sl_monitor
 
     async def _start_sl_monitor():
-        """Load active positions and start monitoring."""
+        """Recover pending fills then start SL monitoring."""
         try:
+            # 재시작 시 미확인 체결 복구 → SL 보호 누락 방지
+            async with db_module.async_session_factory() as session:
+                from datetime import datetime as dt
+                from zoneinfo import ZoneInfo
+                today_str = dt.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+                await executor.confirm_fills(session, today_str)
+                logger.info("Startup confirm_fills complete")
             async with db_module.async_session_factory() as session:
                 pos_map = await _build_sl_pos_map(session)
                 await sl_monitor.update_positions(pos_map)

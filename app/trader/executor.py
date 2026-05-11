@@ -94,10 +94,25 @@ class OrderExecutor:
         positions = result.scalars().all()
         results = []
 
+        # 현재 활성 포지션 수 확인
+        active_count_result = await session.execute(
+            select(Position).where(Position.status == "active")
+        )
+        active_count = len(active_count_result.scalars().all())
+
         balance = await self.account_api.get_balance()
-        spent = 0  # Track spent amount to avoid over-allocation
+        # 현금 10% 여유분 확보 (슬리피지/수수료 대비)
+        cash_reserve = int(balance.total_eval * 0.10)
+        spent = cash_reserve  # 여유분만큼 미리 차감
+
+        MAX_TOTAL_POSITIONS = 15  # 전체 전략 합산 최대 보유
 
         for pos in positions:
+            if active_count >= MAX_TOTAL_POSITIONS:
+                logger.warning(f"Max positions reached ({MAX_TOTAL_POSITIONS}), skipping {pos.symbol}")
+                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": f"최대 보유 {MAX_TOTAL_POSITIONS}개 초과"})
+                continue
+
             config = strategy_configs.get(pos.strategy)
             if not config:
                 logger.error(f"No config for strategy {pos.strategy}")
@@ -113,7 +128,9 @@ class OrderExecutor:
                 results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "가격 추정 불가"})
                 continue
             available_eval = balance.total_eval - spent
-            qty = calc_quantity(available_eval, config.capital_allocation, config.position_weight, price)
+            # 갭업/슬리피지 대비 10% 안전 마진
+            safe_price = int(price * 1.10)
+            qty = calc_quantity(available_eval, config.capital_allocation, config.position_weight, safe_price)
 
             if qty <= 0:
                 logger.warning(f"Insufficient funds for {pos.symbol}, removing from pending")
@@ -139,7 +156,8 @@ class OrderExecutor:
             session.add(order)
 
             if order_result.success:
-                spent += qty * price  # Track spent for next position
+                spent += qty * safe_price  # Track spent for next position
+                active_count += 1
                 pos.qty = qty
                 pos.status = "active"  # prevent re-buy on redeploy
                 pos.entry_date = _today_kst()

@@ -78,6 +78,15 @@ async def run_stale_order_cleanup(
                 await session.delete(pos)
             else:
                 cleaned.append(f"  {order.symbol}: 주문 취소 (포지션 유지)")
+        elif order.side == "sell" and order.position_id:
+            # 매도 미체결 → 포지션을 active로 복구 (다음날 재시도)
+            pos = await session.get(Position, order.position_id)
+            if pos and pos.status == "pending_sell":
+                pos.status = "active"
+                pos.exit_reason = None
+                cleaned.append(f"  {order.symbol}: 매도 취소 → 포지션 active 복구")
+            else:
+                cleaned.append(f"  {order.symbol}: 매도 주문 취소")
         else:
             cleaned.append(f"  {order.symbol}: {order.side} 주문 취소")
 

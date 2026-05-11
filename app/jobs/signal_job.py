@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pandas as pd
@@ -41,7 +43,7 @@ async def run_signal_job(
     kis_client: KISClient | None = None,
 ):
     """Daily signal generation job (runs at 15:40)."""
-    today = date.today()
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     today_str = today.strftime("%Y-%m-%d")
 
     logger.info(f"Signal job started for {today_str}")
@@ -143,6 +145,7 @@ async def run_signal_job(
         except Exception:
             failed_symbols.append(sym)
             continue
+        await asyncio.sleep(0.05)  # KIS API rate limit (20 req/s)
 
     logger.info(f"Loaded {len(data_map)} symbols (failed: {len(failed_symbols)})")
 
