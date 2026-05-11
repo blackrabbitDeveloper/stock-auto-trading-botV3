@@ -53,15 +53,7 @@ class OrderExecutor:
                 results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "SL 매도 완료 대기"})
                 continue
 
-            # Cancel broker-side SL order before selling
             sell_qty = pos.qty
-            if pos.sl_order_no:
-                cancel_result = await self.order_api.cancel_order(pos.sl_order_no, sell_qty)
-                if cancel_result.success:
-                    logger.info(f"SL order cancelled for {pos.symbol}: {pos.sl_order_no}")
-                else:
-                    logger.warning(f"SL cancel failed for {pos.symbol}: {cancel_result.message}")
-
             await asyncio.sleep(1.0)  # rate limit protection
             order_result = await self.order_api.sell_market(pos.symbol, sell_qty)
 
@@ -215,6 +207,14 @@ class OrderExecutor:
 
     async def _process_fill(self, session: AsyncSession, db_order: Order, fill, results: list[dict]):
         """Process a single fill match. Isolated so one failure doesn't block others."""
+        # 부분 체결 감지
+        if fill.qty < db_order.qty:
+            logger.warning(f"Partial fill: {db_order.symbol} filled {fill.qty}/{db_order.qty}")
+            if self.notifier:
+                await self.notifier.send_error(
+                    f"⚠️ 부분 체결: {db_order.symbol} {fill.qty}/{db_order.qty}주 — 수동 확인 필요"
+                )
+
         db_order.status = "filled"
         db_order.filled_price = fill.price
         db_order.filled_qty = fill.qty
@@ -242,40 +242,8 @@ class OrderExecutor:
             else:
                 pos.sl_price = int(fill.price * (1 - sl_pct))
 
-            sl_result = await self.sl_manager.register_sl(pos)
-            if sl_result.success:
-                pos.sl_order_no = sl_result.order_no
-            else:
-                logger.error(f"SL registration FAILED for {pos.symbol}, selling immediately")
-                if self.notifier:
-                    await self.notifier.send_error(
-                        f"⚠️ SL 등록 실패 → 긴급 매도: {pos.symbol} {pos.name}"
-                    )
-                sell_back = await self.order_api.sell_market(pos.symbol, pos.qty)
-                if sell_back.success:
-                    emergency_order = Order(
-                        position_id=pos.id,
-                        strategy=pos.strategy,
-                        symbol=pos.symbol,
-                        name=pos.name,
-                        side="sell",
-                        order_type="market",
-                        qty=pos.qty,
-                        price=0,
-                        order_no=sell_back.order_no,
-                        status="submitted",
-                    )
-                    session.add(emergency_order)
-                    pos.status = "pending_sell"
-                    pos.qty = 0
-                    pos.exit_reason = "sl_register_fail"
-                else:
-                    logger.error(f"Emergency sell also failed for {pos.symbol}: {sell_back.message}")
-                    if self.notifier:
-                        await self.notifier.send_error(
-                            f"🚨 위험: {pos.symbol} {pos.name} SL 등록 실패 + 긴급 매도 실패! "
-                            f"수동 매도 필요! qty={pos.qty}"
-                        )
+            # SL은 WebSocket 모니터가 실시간 감시 (브로커 지정가 SL은 즉시 체결 위험)
+            logger.info(f"Buy filled: {pos.symbol} @ {fill.price:,} SL={pos.sl_price:,} (WebSocket monitored)")
 
             results.append({
                 "type": "buy_filled",

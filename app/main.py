@@ -119,6 +119,9 @@ async def lifespan(app: FastAPI):
 
     executor = OrderExecutor(order_api, account_api, sl_manager, strategy_configs, notifier)
 
+    # 매도 동시 실행 방지 (WS SL콜백 + order_job 이중 매도 차단)
+    sell_lock = asyncio.Lock()
+
     # Store in app state
     app.state.real_client = real_client
     app.state.trade_client = trade_client
@@ -150,40 +153,11 @@ async def lifespan(app: FastAPI):
             }
         return pos_map
 
-    async def _sync_broker_sl(session):
-        """signal_job 후 trail/breakeven으로 올라간 SL을 브로커에도 반영."""
-        from app.models.position import Position
-        result = await session.execute(
-            select(Position).where(Position.status == "active", Position.sl_order_no.isnot(None))
-        )
-        positions = result.scalars().all()
-        for pos in positions:
-            effective_sl = max(pos.sl_price or 0, pos.trail_price or 0)
-            if effective_sl <= 0 or not pos.qty:
-                continue
-            # 브로커 SL은 register_sl 시점의 sl_price로 등록됨
-            # trail/breakeven이 올렸으면 브로커도 갱신
-            original_sl = pos.sl_price or 0
-            if pos.trail_price and pos.trail_price > original_sl:
-                try:
-                    update_result = await sl_manager.update_sl(pos, pos.trail_price)
-                    if update_result.success:
-                        pos.sl_order_no = update_result.order_no
-                        logger.info(f"Broker SL updated: {pos.symbol} → {pos.trail_price:,}")
-                    else:
-                        logger.warning(f"Broker SL update failed: {pos.symbol} {update_result.message}")
-                except Exception as e:
-                    logger.error(f"Broker SL update error: {pos.symbol} {e}")
-        await session.commit()
-
     async def _signal_job():
         if not _is_trading_day():
             return
         async with db_module.async_session_factory() as session:
             await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, real_client)
-        # 브로커 SL 갱신 (trail/breakeven 반영)
-        async with db_module.async_session_factory() as session:
-            await _sync_broker_sl(session)
         # Update SL monitor with latest positions
         async with db_module.async_session_factory() as session:
             pos_map = await _build_sl_pos_map(session)
@@ -193,7 +167,7 @@ async def lifespan(app: FastAPI):
     async def _order_job():
         if not _is_trading_day():
             return
-        async with db_module.async_session_factory() as session:
+        async with sell_lock, db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
         # Update SL monitor with newly bought positions
         async with db_module.async_session_factory() as session:
@@ -241,7 +215,7 @@ async def lifespan(app: FastAPI):
 
     async def _on_sl_hit(symbol: str, price: int, reason: str):
         """Callback when SL/trail is hit — immediately sell."""
-        async with db_module.async_session_factory() as session:
+        async with sell_lock, db_module.async_session_factory() as session:
             from app.models.position import Position
             result = await session.execute(
                 select(Position).where(Position.symbol == symbol, Position.status == "active")
@@ -265,14 +239,6 @@ async def lifespan(app: FastAPI):
             pos.status = "pending_sell"
             pos.exit_reason = reason
             await session.flush()
-
-            # Cancel broker-side SL order before market sell
-            if pos.sl_order_no:
-                cancel_result = await order_api.cancel_order(pos.sl_order_no, pos.qty)
-                if cancel_result.success:
-                    logger.info(f"SL order cancelled for {symbol}: {pos.sl_order_no}")
-                else:
-                    logger.warning(f"SL cancel failed for {symbol}: {cancel_result.message}")
 
             sell_qty = pos.qty
             sell_result = await order_api.sell_market(pos.symbol, sell_qty)
@@ -411,6 +377,8 @@ async def remove_position(position_id: int, request: Request, session: AsyncSess
     pos = await session.get(Position, position_id)
     if not pos:
         return {"error": "Position not found"}
+    if pos.status == "active":
+        return {"error": f"Active 포지션은 삭제 불가 ({pos.symbol} {pos.name})"}
     # Delete related orders first (FK constraint)
     orders = (await session.execute(select(Order).where(Order.position_id == pos.id))).scalars().all()
     for order in orders:
