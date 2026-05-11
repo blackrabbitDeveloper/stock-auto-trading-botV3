@@ -204,104 +204,113 @@ class OrderExecutor:
             if not fill:
                 continue
 
-            db_order.status = "filled"
-            db_order.filled_price = fill.price
-            db_order.filled_qty = fill.qty
-            db_order.filled_at = datetime.now()
-
-            pos = await session.get(Position, db_order.position_id)
-            if not pos:
-                continue
-
-            if db_order.side == "buy":
-                pos.status = "active"
-                pos.entry_date = _today_kst()
-                pos.entry_price = fill.price
-                pos.peak_price = fill.price
-                pos.qty = fill.qty
-
-                # Use strategy config for ATR multiplier (matches backtester)
-                config = self.strategy_configs.get(pos.strategy)
-                atr_mult = config.atr_sl_multiplier if config else 0.5
-                sl_pct = config.stop_loss_pct if config else 0.03
-
-                atr_enabled = config.atr_sl_enabled if config else True
-                if atr_enabled and pos.entry_atr and pos.entry_atr > 0:
-                    pos.sl_price = int(fill.price - pos.entry_atr * atr_mult)
-                else:
-                    pos.sl_price = int(fill.price * (1 - sl_pct))
-
-                sl_result = await self.sl_manager.register_sl(pos)
-                if sl_result.success:
-                    pos.sl_order_no = sl_result.order_no
-                else:
-                    # SL 등록 실패 → 즉시 시장가 매도로 안전하게 청산
-                    logger.error(f"SL registration FAILED for {pos.symbol}, selling immediately")
-                    if self.notifier:
-                        await self.notifier.send_error(
-                            f"⚠️ SL 등록 실패 → 긴급 매도: {pos.symbol} {pos.name}"
-                        )
-                    sell_back = await self.order_api.sell_market(pos.symbol, pos.qty)
-                    if sell_back.success:
-                        emergency_order = Order(
-                            position_id=pos.id,
-                            strategy=pos.strategy,
-                            symbol=pos.symbol,
-                            name=pos.name,
-                            side="sell",
-                            order_type="market",
-                            qty=pos.qty,
-                            price=0,
-                            order_no=sell_back.order_no,
-                            status="submitted",
-                        )
-                        session.add(emergency_order)
-                        pos.status = "pending_sell"
-                        pos.qty = 0
-                        pos.exit_reason = "sl_register_fail"
-                    else:
-                        logger.error(f"Emergency sell also failed for {pos.symbol}: {sell_back.message}")
-                        if self.notifier:
-                            await self.notifier.send_error(
-                                f"🚨 위험: {pos.symbol} {pos.name} SL 등록 실패 + 긴급 매도 실패! "
-                                f"수동 매도 필요! qty={pos.qty}"
-                            )
-
-                results.append({
-                    "type": "buy_filled",
-                    "symbol": pos.symbol,
-                    "name": pos.name,
-                    "price": fill.price,
-                    "qty": fill.qty,
-                    "sl_price": pos.sl_price,
-                })
-
-            elif db_order.side == "sell":
-                trade = Trade(
-                    strategy=pos.strategy,
-                    symbol=pos.symbol,
-                    name=pos.name,
-                    entry_date=pos.entry_date,
-                    exit_date=_today_kst(),
-                    entry_price=pos.entry_price,
-                    exit_price=fill.price,
-                    qty=fill.qty,
-                    return_pct=(fill.price / pos.entry_price - 1) if pos.entry_price else 0,
-                    pnl=(fill.price - pos.entry_price) * fill.qty if pos.entry_price else 0,
-                    holding_days=pos.holding_days,
-                    exit_reason=pos.exit_reason or "manual",
-                )
-                session.add(trade)
-                await session.delete(pos)
-
-                results.append({
-                    "type": "sell_filled",
-                    "symbol": trade.symbol,
-                    "name": trade.name,
-                    "price": fill.price,
-                    "return_pct": trade.return_pct,
-                    "pnl": trade.pnl,
-                })
+            try:
+                await self._process_fill(session, db_order, fill, results)
+            except Exception as e:
+                logger.error(f"Fill processing failed for {db_order.symbol} order={db_order.order_no}: {e}")
+                await session.rollback()
 
         await session.commit()
         return results
+
+    async def _process_fill(self, session: AsyncSession, db_order: Order, fill, results: list[dict]):
+        """Process a single fill match. Isolated so one failure doesn't block others."""
+        db_order.status = "filled"
+        db_order.filled_price = fill.price
+        db_order.filled_qty = fill.qty
+        db_order.filled_at = datetime.now(KST)
+
+        pos = await session.get(Position, db_order.position_id)
+        if not pos:
+            await session.flush()
+            return
+
+        if db_order.side == "buy":
+            pos.status = "active"
+            pos.entry_date = _today_kst()
+            pos.entry_price = fill.price
+            pos.peak_price = fill.price
+            pos.qty = fill.qty
+
+            config = self.strategy_configs.get(pos.strategy)
+            atr_mult = config.atr_sl_multiplier if config else 0.5
+            sl_pct = config.stop_loss_pct if config else 0.03
+
+            atr_enabled = config.atr_sl_enabled if config else True
+            if atr_enabled and pos.entry_atr and pos.entry_atr > 0:
+                pos.sl_price = int(fill.price - pos.entry_atr * atr_mult)
+            else:
+                pos.sl_price = int(fill.price * (1 - sl_pct))
+
+            sl_result = await self.sl_manager.register_sl(pos)
+            if sl_result.success:
+                pos.sl_order_no = sl_result.order_no
+            else:
+                logger.error(f"SL registration FAILED for {pos.symbol}, selling immediately")
+                if self.notifier:
+                    await self.notifier.send_error(
+                        f"⚠️ SL 등록 실패 → 긴급 매도: {pos.symbol} {pos.name}"
+                    )
+                sell_back = await self.order_api.sell_market(pos.symbol, pos.qty)
+                if sell_back.success:
+                    emergency_order = Order(
+                        position_id=pos.id,
+                        strategy=pos.strategy,
+                        symbol=pos.symbol,
+                        name=pos.name,
+                        side="sell",
+                        order_type="market",
+                        qty=pos.qty,
+                        price=0,
+                        order_no=sell_back.order_no,
+                        status="submitted",
+                    )
+                    session.add(emergency_order)
+                    pos.status = "pending_sell"
+                    pos.qty = 0
+                    pos.exit_reason = "sl_register_fail"
+                else:
+                    logger.error(f"Emergency sell also failed for {pos.symbol}: {sell_back.message}")
+                    if self.notifier:
+                        await self.notifier.send_error(
+                            f"🚨 위험: {pos.symbol} {pos.name} SL 등록 실패 + 긴급 매도 실패! "
+                            f"수동 매도 필요! qty={pos.qty}"
+                        )
+
+            results.append({
+                "type": "buy_filled",
+                "symbol": pos.symbol,
+                "name": pos.name,
+                "price": fill.price,
+                "qty": fill.qty,
+                "sl_price": pos.sl_price,
+            })
+
+        elif db_order.side == "sell":
+            trade = Trade(
+                strategy=pos.strategy,
+                symbol=pos.symbol,
+                name=pos.name,
+                entry_date=pos.entry_date or _today_kst(),
+                exit_date=_today_kst(),
+                entry_price=pos.entry_price,
+                exit_price=fill.price,
+                qty=fill.qty,
+                return_pct=(fill.price / pos.entry_price - 1) if pos.entry_price else 0,
+                pnl=(fill.price - pos.entry_price) * fill.qty if pos.entry_price else 0,
+                holding_days=pos.holding_days,
+                exit_reason=pos.exit_reason or "manual",
+            )
+            session.add(trade)
+            await session.delete(pos)
+
+            results.append({
+                "type": "sell_filled",
+                "symbol": trade.symbol,
+                "name": trade.name,
+                "price": fill.price,
+                "return_pct": trade.return_pct,
+                "pnl": trade.pnl,
+            })
+
+        await session.flush()
