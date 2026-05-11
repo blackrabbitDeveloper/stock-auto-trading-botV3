@@ -16,6 +16,7 @@ class Order(Base):
     position_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("positions.id"), nullable=True)
     strategy: Mapped[str] = mapped_column(String(30))
     symbol: Mapped[str] = mapped_column(String(10))
+    name: Mapped[str] = mapped_column(String(50), default="")
     side: Mapped[str] = mapped_column(String(4))
     order_type: Mapped[str] = mapped_column(String(10))
     qty: Mapped[int] = mapped_column(Integer)

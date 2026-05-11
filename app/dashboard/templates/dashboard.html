@@ -299,8 +299,8 @@
                     <tbody>
                         {% for order in orders %}
                         <tr class="border-b border-gray-700/50">
-                            <td class="py-2">{{ order.submitted_at.strftime('%m-%d %H:%M') if order.submitted_at else '' }}</td>
-                            <td>{{ order.symbol }}</td>
+                            <td class="py-2">{{ order.submitted_at|kst }}</td>
+                            <td>{{ order.symbol }} {{ order.name }}</td>
                             <td class="{% if order.side == 'buy' %}text-red-400{% else %}text-blue-400{% endif %}">
                                 {{ '매수' if order.side == 'buy' else '매도' }}
                             </td>

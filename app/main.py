@@ -26,6 +26,38 @@ from app.jobs.confirm_job import run_stale_order_cleanup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+_trading_day_cache: dict = {}
+
+
+def _is_trading_day() -> bool:
+    """Check if today is a Korean stock market trading day (not weekend/holiday).
+
+    Uses `holidays` package for public holiday detection.
+    Weekends are already filtered by CronTrigger(day_of_week="mon-fri"),
+    but checked here as a safety net.
+    """
+    from datetime import date
+    today = date.today()
+    if today in _trading_day_cache:
+        return _trading_day_cache[today]
+    try:
+        import holidays
+        if today.weekday() >= 5:
+            logger.info(f"Not a trading day: {today} (weekend)")
+            _trading_day_cache[today] = False
+            return False
+        kr_holidays = holidays.KR(years=today.year)
+        if today in kr_holidays:
+            logger.info(f"Not a trading day: {today} (holiday: {kr_holidays[today]})")
+            _trading_day_cache[today] = False
+            return False
+        _trading_day_cache[today] = True
+        return True
+    except Exception as e:
+        logger.warning(f"Trading day check failed ({e}), assuming trading day")
+        return True
+
 scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
 
 
@@ -119,6 +151,8 @@ async def lifespan(app: FastAPI):
         return pos_map
 
     async def _signal_job():
+        if not _is_trading_day():
+            return
         async with db_module.async_session_factory() as session:
             await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, real_client)
         # Update SL monitor with latest positions
@@ -128,6 +162,8 @@ async def lifespan(app: FastAPI):
                 await sl_monitor.update_positions(pos_map)
 
     async def _order_job():
+        if not _is_trading_day():
+            return
         async with db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
         # Update SL monitor with newly bought positions
@@ -137,6 +173,8 @@ async def lifespan(app: FastAPI):
                 await sl_monitor.update_positions(pos_map)
 
     async def _confirm_job():
+        if not _is_trading_day():
+            return
         async with db_module.async_session_factory() as session:
             await run_confirm_job(session, executor, notifier)
         # Update SL monitor after confirm (sl_price now set from actual fill price)
@@ -155,17 +193,19 @@ async def lifespan(app: FastAPI):
             logger.error(f"Token refresh failed: {e}")
             await notifier.send_error(f"Token refresh failed: {e}")
 
-    scheduler.add_job(_signal_job, CronTrigger(hour=15, minute=40), id="signal_job", misfire_grace_time=300)
-    scheduler.add_job(_order_job, CronTrigger(hour=8, minute=59), id="order_job", misfire_grace_time=60)
-    scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
-    scheduler.add_job(_confirm_job, CronTrigger(hour=9, minute=30), id="confirm_job_retry", misfire_grace_time=60)
-    scheduler.add_job(_refresh_token, CronTrigger(hour=8, minute=0), id="token_refresh")
+    scheduler.add_job(_signal_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=40), id="signal_job", misfire_grace_time=300)
+    scheduler.add_job(_order_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=59), id="order_job", misfire_grace_time=60)
+    scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
+    scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=30), id="confirm_job_retry", misfire_grace_time=60)
+    scheduler.add_job(_refresh_token, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="token_refresh")
 
     async def _stale_order_cleanup():
+        if not _is_trading_day():
+            return
         async with db_module.async_session_factory() as session:
             await run_stale_order_cleanup(session, notifier)
 
-    scheduler.add_job(_stale_order_cleanup, CronTrigger(hour=15, minute=35), id="stale_order_cleanup", misfire_grace_time=300)
+    scheduler.add_job(_stale_order_cleanup, CronTrigger(day_of_week="mon-fri", hour=15, minute=35), id="stale_order_cleanup", misfire_grace_time=300)
 
     # WebSocket SL monitor
     from app.broker.websocket import StopLossMonitor
@@ -208,6 +248,21 @@ async def lifespan(app: FastAPI):
             sell_qty = pos.qty
             sell_result = await order_api.sell_market(pos.symbol, sell_qty)
             if sell_result.success:
+                # DB에 sell Order 기록 → confirm_fills에서 매칭 후 포지션 삭제
+                from app.models.order import Order
+                sell_order = Order(
+                    position_id=pos.id,
+                    strategy=pos.strategy,
+                    symbol=pos.symbol,
+                    name=pos.name,
+                    side="sell",
+                    order_type="market",
+                    qty=sell_qty,
+                    price=0,
+                    order_no=sell_result.order_no,
+                    status="submitted",
+                )
+                session.add(sell_order)
                 pos.qty = 0  # prevent double-sell by order_job
                 pos.sl_order_no = None
                 await session.commit()
@@ -388,7 +443,7 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
             if old_price != new_price:
                 pos.entry_price = new_price
                 pos.peak_price = max(pos.peak_price or 0, new_price)
-                updated.append(f"{pos.symbol} {pos.name}: {old_price:,} -> {new_price:,}")
+                updated.append(f"{pos.symbol} {pos.name}: {old_price or 0:,} -> {new_price:,}")
 
     await session.commit()
     return {"status": "ok", "updated": len(updated), "details": updated}

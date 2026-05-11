@@ -13,6 +13,20 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/dashboard/templates")
 
 
+def _to_kst(dt):
+    """Convert naive UTC datetime to KST string."""
+    if not dt:
+        return ""
+    from datetime import timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KST).strftime("%m-%d %H:%M")
+
+
+templates.env.filters["kst"] = _to_kst
+
+
 def verify_token(request: Request):
     """Simple bearer token auth for dashboard."""
     settings = AppSettings()
