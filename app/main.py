@@ -351,7 +351,10 @@ async def reset_positions(request: Request, session: AsyncSession = Depends(get_
 
     from app.models.position import Position
     from app.models.order import Order
-    result = await session.execute(select(Position))
+    # active 포지션은 브로커 SL 주문이 살아있으므로 삭제하면 안 됨
+    result = await session.execute(
+        select(Position).where(Position.status.in_(["pending_buy", "pending_sell"]))
+    )
     positions = result.scalars().all()
     count = len(positions)
     # Delete related orders first (FK constraint)

@@ -7,7 +7,7 @@ from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import get_session, Position, Order, Trade
-from app.config import AppSettings, KISConfig
+from app.config import AppSettings
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/dashboard/templates")
@@ -49,8 +49,7 @@ async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
         if not trade_client:
             raise RuntimeError("trade_client not initialized")
 
-        kis_config = KISConfig()
-        env = kis_config.env
+        env = trade_client.config.env
         tr_id = "VTTC8434R" if env == "paper" else "TTTC8434R"
 
         data = await trade_client.request("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", tr_id, params={
@@ -88,10 +87,10 @@ async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
             "pnl_today": int(summary.get("evlu_pfls_smtl_amt", 0)),
         }, api_prices
     except Exception as e:
-        kis_config = KISConfig()
+        fallback_env = trade_client.config.env if trade_client else "paper"
         return {
-            "env": kis_config.env,
-            "env_label": "모의투자" if kis_config.env == "paper" else "실전",
+            "env": fallback_env,
+            "env_label": "모의투자" if fallback_env == "paper" else "실전",
             "account_no": "",
             "total_eval": 0,
             "cash": 0,

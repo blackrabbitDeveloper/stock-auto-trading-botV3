@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +23,7 @@ async def run_confirm_job(
     """Fill confirmation job (runs at 09:05)."""
     logger.info("Confirm job started")
 
-    today_str = date.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
     results = await executor.confirm_fills(session, today_str)
 
     if results:

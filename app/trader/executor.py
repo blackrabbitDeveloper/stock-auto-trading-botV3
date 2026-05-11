@@ -3,6 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _today_kst() -> date:
+    return datetime.now(KST).date()
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,23 +47,23 @@ class OrderExecutor:
         results = []
 
         for pos in positions:
-            # Validate qty
+            # qty=0이면 SL 모니터가 이미 매도 처리 → confirm_fills에서 정리
             if not pos.qty or pos.qty <= 0:
-                logger.warning(f"Skipping sell for {pos.symbol}: qty={pos.qty}")
-                await session.delete(pos)
-                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "수량 없음 (삭제)"})
+                logger.warning(f"Skipping sell for {pos.symbol}: qty={pos.qty} (already sold by SL monitor)")
+                results.append({"symbol": pos.symbol, "name": pos.name, "success": False, "message": "SL 매도 완료 대기"})
                 continue
 
             # Cancel broker-side SL order before selling
+            sell_qty = pos.qty
             if pos.sl_order_no:
-                cancel_result = await self.order_api.cancel_order(pos.sl_order_no, pos.qty)
+                cancel_result = await self.order_api.cancel_order(pos.sl_order_no, sell_qty)
                 if cancel_result.success:
                     logger.info(f"SL order cancelled for {pos.symbol}: {pos.sl_order_no}")
                 else:
                     logger.warning(f"SL cancel failed for {pos.symbol}: {cancel_result.message}")
 
             await asyncio.sleep(1.0)  # rate limit protection
-            order_result = await self.order_api.sell_market(pos.symbol, pos.qty)
+            order_result = await self.order_api.sell_market(pos.symbol, sell_qty)
 
             order = Order(
                 position_id=pos.id,
@@ -65,12 +72,15 @@ class OrderExecutor:
                 name=pos.name,
                 side="sell",
                 order_type="market",
-                qty=pos.qty,
+                qty=sell_qty,
                 price=0,
                 order_no=order_result.order_no if order_result.success else None,
                 status="submitted" if order_result.success else "failed",
             )
             session.add(order)
+
+            if order_result.success:
+                pos.qty = 0  # 이중 매도 방지
 
             results.append({
                 "symbol": pos.symbol,
@@ -140,7 +150,7 @@ class OrderExecutor:
                 spent += qty * price  # Track spent for next position
                 pos.qty = qty
                 pos.status = "active"  # prevent re-buy on redeploy
-                pos.entry_date = date.today()
+                pos.entry_date = _today_kst()
                 # entry_price, peak_price are set by confirm_fills() with actual fill price
                 # Do NOT set them here — the estimated price can differ significantly
 
@@ -205,7 +215,7 @@ class OrderExecutor:
 
             if db_order.side == "buy":
                 pos.status = "active"
-                pos.entry_date = date.today()
+                pos.entry_date = _today_kst()
                 pos.entry_price = fill.price
                 pos.peak_price = fill.price
                 pos.qty = fill.qty
@@ -233,7 +243,21 @@ class OrderExecutor:
                         )
                     sell_back = await self.order_api.sell_market(pos.symbol, pos.qty)
                     if sell_back.success:
+                        emergency_order = Order(
+                            position_id=pos.id,
+                            strategy=pos.strategy,
+                            symbol=pos.symbol,
+                            name=pos.name,
+                            side="sell",
+                            order_type="market",
+                            qty=pos.qty,
+                            price=0,
+                            order_no=sell_back.order_no,
+                            status="submitted",
+                        )
+                        session.add(emergency_order)
                         pos.status = "pending_sell"
+                        pos.qty = 0
                         pos.exit_reason = "sl_register_fail"
                     else:
                         logger.error(f"Emergency sell also failed for {pos.symbol}: {sell_back.message}")
@@ -258,7 +282,7 @@ class OrderExecutor:
                     symbol=pos.symbol,
                     name=pos.name,
                     entry_date=pos.entry_date,
-                    exit_date=date.today(),
+                    exit_date=_today_kst(),
                     entry_price=pos.entry_price,
                     exit_price=fill.price,
                     qty=fill.qty,
