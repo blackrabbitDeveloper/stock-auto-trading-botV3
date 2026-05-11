@@ -73,7 +73,10 @@ async def run_stale_order_cleanup(
             pos = await session.get(Position, order.position_id)
             if pos and pos.status == "active" and not pos.entry_price:
                 # entry_price가 없다 = 실제로 매수가 안 됨
-                pos.status = "cancelled"
+                from sqlalchemy import update as sql_update
+                await session.execute(
+                    sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+                )
                 cleaned.append(f"  {order.symbol}: 주문 취소 + 포지션 삭제")
                 await session.delete(pos)
             else:
