@@ -83,6 +83,16 @@ class OrderExecutor:
             })
 
         await session.commit()
+
+        # 모의투자: 시장가 주문 즉시 체결 → 바로 confirm 실행
+        if self.order_api.client.config.env == "paper" and any(r.get("success") for r in results):
+            logger.info("Paper mode: running immediate confirm_fills after sells")
+            await asyncio.sleep(2.0)
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            confirm_results = await self.confirm_fills(session, today_str, lookback_days=1)
+            if confirm_results:
+                logger.info(f"Paper immediate confirm: {len(confirm_results)} fills confirmed")
+
         return results
 
     async def execute_buys(self, session: AsyncSession, strategy_configs: dict[str, StrategyParams]) -> list[dict]:

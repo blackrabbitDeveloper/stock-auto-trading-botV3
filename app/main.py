@@ -198,6 +198,9 @@ async def lifespan(app: FastAPI):
 
     scheduler.add_job(_signal_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=40), id="signal_job", misfire_grace_time=300)
     scheduler.add_job(_order_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=59), id="order_job", misfire_grace_time=60)
+    # 모의투자: 09:00 개장 즉시 체결 → 09:01 early confirm (entry_price/sl_price 빠른 설정)
+    if kis_config.env == "paper":
+        scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=1), id="confirm_job_early", misfire_grace_time=60)
     scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
     scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=30), id="confirm_job_retry", misfire_grace_time=60)
     scheduler.add_job(_refresh_token, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="token_refresh")
