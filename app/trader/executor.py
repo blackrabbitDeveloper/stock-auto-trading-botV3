@@ -298,12 +298,21 @@ class OrderExecutor:
                 exit_reason=pos.exit_reason or "manual",
             )
             session.add(trade)
-            # FK 제약 해제 후 포지션 삭제
-            from sqlalchemy import update
-            await session.execute(
-                update(Order).where(Order.position_id == pos.id).values(position_id=None)
-            )
-            await session.delete(pos)
+
+            remaining_qty = (pos.qty or 0) - fill.qty
+            if remaining_qty > 0:
+                # 부분 체결: 잔여 수량 유지, active 복구
+                pos.qty = remaining_qty
+                pos.status = "active"
+                pos.exit_reason = None
+                logger.warning(f"Partial sell: {pos.symbol} sold {fill.qty}, remaining {remaining_qty}")
+            else:
+                # 전량 체결: 포지션 삭제
+                from sqlalchemy import update
+                await session.execute(
+                    update(Order).where(Order.position_id == pos.id).values(position_id=None)
+                )
+                await session.delete(pos)
 
             results.append({
                 "type": "sell_filled",
