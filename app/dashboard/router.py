@@ -39,10 +39,10 @@ def verify_token(request: Request):
             raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
-    """Fetch account info and per-stock prices from balance API.
+async def _get_account_info(request: Request) -> tuple[dict, dict[str, int], list[dict]]:
+    """Fetch account info, per-stock prices, and broker holdings from balance API.
 
-    Returns (account_info, api_prices) where api_prices maps symbol -> current price.
+    Returns (account_info, api_prices, broker_holdings).
     """
     try:
         trade_client = getattr(request.app.state, "trade_client", None)
@@ -69,13 +69,26 @@ async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
         output2 = data.get("output2", [{}])
         summary = output2[0] if output2 else {}
 
-        # Extract per-stock current prices from output1
+        # Extract per-stock data from output1
         api_prices = {}
+        broker_holdings = []
         for item in data.get("output1", []):
             symbol = item.get("pdno", "")
+            qty = int(item.get("hldg_qty", 0))
+            if not symbol or qty <= 0:
+                continue
             price = int(item.get("prpr", 0))
-            if symbol and price > 0:
+            if price > 0:
                 api_prices[symbol] = price
+            broker_holdings.append({
+                "symbol": symbol,
+                "name": item.get("prdt_name", ""),
+                "qty": qty,
+                "avg_price": int(float(item.get("pchs_avg_pric", "0"))),
+                "current_price": price,
+                "eval_pnl": int(item.get("evlu_pfls_amt", 0)),
+                "pnl_pct": float(item.get("evlu_pfls_rt", 0)),
+            })
 
         return {
             "env": env,
@@ -85,7 +98,7 @@ async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
             "cash": int(summary.get("dnca_tot_amt", 0)),
             "stock_eval": int(summary.get("scts_evlu_amt", 0)),
             "pnl_today": int(summary.get("evlu_pfls_smtl_amt", 0)),
-        }, api_prices
+        }, api_prices, broker_holdings
     except Exception as e:
         fallback_env = trade_client.config.env if trade_client else "paper"
         return {
@@ -97,7 +110,7 @@ async def _get_account_info(request: Request) -> tuple[dict, dict[str, int]]:
             "stock_eval": 0,
             "pnl_today": 0,
             "error": str(e),
-        }, {}
+        }, {}, []
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -108,22 +121,47 @@ async def index(request: Request):
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
-    # Account info + API prices (fallback for after-hours)
-    account, api_prices = await _get_account_info(request)
+    # Account info + API prices + broker holdings
+    account, api_prices, broker_holdings = await _get_account_info(request)
 
-    # Active positions
+    # DB positions (for strategy/SL/trail metadata)
     stmt = select(Position).where(Position.status.in_(["active", "pending_buy", "pending_sell"])).order_by(Position.strategy)
     positions = (await session.execute(stmt)).scalars().all()
 
-    # Pending buys
     pending_buys = [p for p in positions if p.status == "pending_buy"]
-    active_positions = [p for p in positions if p.status == "active"]
     pending_sells = [p for p in positions if p.status == "pending_sell"]
 
     # Merge prices: WebSocket (real-time) > API (fallback for after-hours)
     sl_monitor = getattr(request.app.state, "sl_monitor", None)
     ws_prices = sl_monitor.current_prices if sl_monitor else {}
     current_prices = {**api_prices, **ws_prices}  # WS overrides API
+
+    # Build holdings view: broker holdings + DB position metadata
+    db_pos_map = {p.symbol: p for p in positions if p.status in ("active", "pending_sell")}
+    holdings = []
+    broker_symbols = set()
+    for h in broker_holdings:
+        sym = h["symbol"]
+        broker_symbols.add(sym)
+        pos = db_pos_map.get(sym)
+        cur_price = current_prices.get(sym, h["current_price"])
+        holdings.append({
+            "symbol": sym,
+            "name": h["name"],
+            "qty": h["qty"],
+            "avg_price": h["avg_price"],
+            "current_price": cur_price,
+            "pnl_pct": ((cur_price / h["avg_price"] - 1) * 100) if (cur_price and h["avg_price"] > 0) else h["pnl_pct"],
+            "strategy": pos.strategy if pos else None,
+            "status": pos.status if pos else None,
+            "sl_price": pos.sl_price if pos else None,
+            "trail_price": pos.trail_price if pos else None,
+            "holding_days": pos.holding_days if pos else None,
+            "has_ws": sym in ws_prices,
+        })
+
+    # DB에 active/pending_sell인데 브로커에 없는 종목 (이미 매도됐는데 DB 미반영)
+    db_only = [p for p in positions if p.status in ("active", "pending_sell") and p.symbol not in broker_symbols]
 
     # Recent trades
     stmt = select(Trade).order_by(desc(Trade.created_at)).limit(10)
@@ -143,7 +181,8 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "account": account,
-        "positions": active_positions,
+        "holdings": holdings,
+        "db_only": db_only,
         "pending_buys": pending_buys,
         "pending_sells": pending_sells,
         "trades": trades,

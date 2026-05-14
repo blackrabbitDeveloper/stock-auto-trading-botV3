@@ -200,15 +200,16 @@
         </div>
         {% endif %}
 
-        <!-- Active Positions -->
+        <!-- Broker Holdings (실제 계좌 기준) -->
         <div class="bg-gray-800 rounded-lg p-4 mb-6">
-            <h2 class="text-lg font-semibold mb-3">보유 종목</h2>
+            <h2 class="text-lg font-semibold mb-3">보유 종목 <span class="text-xs text-gray-400 font-normal">(실제 계좌)</span></h2>
             <div class="overflow-x-auto">
                 <table class="w-full text-sm">
                     <thead class="text-gray-400 border-b border-gray-700">
                         <tr>
                             <th class="text-left py-2">종목</th>
                             <th class="text-left">전략</th>
+                            <th class="text-right">수량</th>
                             <th class="text-right">매수가</th>
                             <th class="text-right">현재가</th>
                             <th class="text-right">수익률</th>
@@ -217,30 +218,46 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for pos in positions %}
-                        {% set cur_price = current_prices.get(pos.symbol, 0) %}
-                        {% set pnl_pct = ((cur_price / pos.entry_price - 1) * 100) if (cur_price and pos.entry_price) else 0 %}
+                        {% for h in holdings %}
                         <tr class="border-b border-gray-700/50">
                             <td class="py-2">
-                                <a href="https://m.stock.naver.com/domestic/stock/{{ pos.symbol }}/total" target="_blank" class="hover:text-blue-400 underline decoration-gray-600">{{ pos.symbol }} {{ pos.name }}</a>
-                                {% if pos.symbol in current_prices %}
+                                <a href="https://m.stock.naver.com/domestic/stock/{{ h.symbol }}/total" target="_blank" class="hover:text-blue-400 underline decoration-gray-600">{{ h.symbol }} {{ h.name }}</a>
+                                {% if h.has_ws %}
                                 <span class="ml-1 px-1 py-0.5 bg-green-800 text-green-300 text-[10px] rounded">LIVE</span>
                                 {% endif %}
+                                {% if h.status == "pending_sell" %}
+                                <span class="ml-1 px-1 py-0.5 bg-yellow-800 text-yellow-300 text-[10px] rounded">매도대기</span>
+                                {% elif not h.strategy %}
+                                <span class="ml-1 px-1 py-0.5 bg-red-800 text-red-300 text-[10px] rounded">미등록</span>
+                                {% endif %}
                             </td>
-                            <td>{{ pos.strategy }}</td>
-                            <td class="text-right">{{ "{:,}".format(pos.entry_price or 0) }}</td>
-                            <td class="text-right {% if cur_price %}font-bold{% endif %}">{{ "{:,}".format(cur_price) if cur_price else "-" }}</td>
-                            <td class="text-right {% if pnl_pct > 0 %}text-green-400{% elif pnl_pct < 0 %}text-red-400{% endif %}">{{ "{:+.1f}%".format(pnl_pct) if cur_price else "-" }}</td>
-                            <td class="text-right text-red-300">{{ "{:,}".format([pos.sl_price or 0, pos.trail_price or 0]|max) }}</td>
-                            <td class="text-right">{{ pos.holding_days }}d</td>
+                            <td>{{ h.strategy or "-" }}</td>
+                            <td class="text-right">{{ h.qty }}</td>
+                            <td class="text-right">{{ "{:,}".format(h.avg_price) }}</td>
+                            <td class="text-right {% if h.current_price %}font-bold{% endif %}">{{ "{:,}".format(h.current_price) if h.current_price else "-" }}</td>
+                            <td class="text-right {% if h.pnl_pct > 0 %}text-green-400{% elif h.pnl_pct < 0 %}text-red-400{% endif %}">{{ "{:+.1f}%".format(h.pnl_pct) if h.current_price else "-" }}</td>
+                            <td class="text-right text-red-300">
+                                {% if h.sl_price or h.trail_price %}
+                                {{ "{:,}".format([h.sl_price or 0, h.trail_price or 0]|max) }}
+                                {% else %}-{% endif %}
+                            </td>
+                            <td class="text-right">{{ "{}d".format(h.holding_days) if h.holding_days is not none else "-" }}</td>
                         </tr>
                         {% endfor %}
-                        {% if not positions %}
-                        <tr><td colspan="7" class="py-4 text-center text-gray-500">보유 종목 없음</td></tr>
+                        {% if not holdings %}
+                        <tr><td colspan="8" class="py-4 text-center text-gray-500">보유 종목 없음</td></tr>
                         {% endif %}
                     </tbody>
                 </table>
             </div>
+            {% if db_only %}
+            <div class="mt-3 p-2 bg-yellow-900/30 border border-yellow-700/50 rounded text-xs text-yellow-300">
+                DB에만 존재 (계좌에 없음):
+                {% for p in db_only %}
+                <span class="ml-1">{{ p.symbol }} {{ p.name }} ({{ p.status }})</span>{% if not loop.last %},{% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
 
         <!-- Recent Trades -->
