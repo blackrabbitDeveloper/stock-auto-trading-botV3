@@ -106,7 +106,7 @@ class KISAccountAPI:
     async def get_filled_orders(self, date_str: str) -> list[FilledOrder]:
         """당일 체결 내역 조회."""
         env = self.client.config.env
-        tr_id = "VTTC8001R" if env == "paper" else "TTTC8001R"
+        tr_id = "VTTC0081R" if env == "paper" else "TTTC0081R"
 
         params = {
             "CANO": self.client.config.account_prefix,
