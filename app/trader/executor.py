@@ -230,6 +230,51 @@ class OrderExecutor:
             except Exception as e:
                 logger.error(f"Fill processing failed for {db_order.symbol} order={db_order.order_no}: {e}")
 
+        # Paper trading fallback: confirm via holdings when fill API returns nothing
+        unmatched = [o for o in db_orders if o.status == "submitted"]
+        if unmatched and not filled_orders:
+            try:
+                holdings = await self.account_api.get_holdings()
+                holding_map = {h.symbol: h for h in holdings}
+                for db_order in unmatched:
+                    try:
+                        if db_order.side == "buy" and db_order.symbol in holding_map:
+                            h = holding_map[db_order.symbol]
+                            from app.broker.account import FilledOrder
+                            synthetic = FilledOrder(
+                                order_no=db_order.order_no,
+                                symbol=db_order.symbol,
+                                side="buy",
+                                qty=h.qty,
+                                price=h.avg_price,
+                                total_amount=h.avg_price * h.qty,
+                            )
+                            async with session.begin_nested():
+                                await self._process_fill(session, db_order, synthetic, results)
+                            logger.info(f"Paper confirm (holdings): BUY {db_order.symbol} @ {h.avg_price:,} x {h.qty}")
+                        elif db_order.side == "sell" and db_order.symbol not in holding_map:
+                            pos = await session.get(Position, db_order.position_id) if db_order.position_id else None
+                            try:
+                                sell_price = await self.account_api.get_current_price(db_order.symbol)
+                            except Exception:
+                                sell_price = pos.entry_price if pos else db_order.price
+                            from app.broker.account import FilledOrder
+                            synthetic = FilledOrder(
+                                order_no=db_order.order_no,
+                                symbol=db_order.symbol,
+                                side="sell",
+                                qty=db_order.qty,
+                                price=sell_price or 0,
+                                total_amount=(sell_price or 0) * db_order.qty,
+                            )
+                            async with session.begin_nested():
+                                await self._process_fill(session, db_order, synthetic, results)
+                            logger.info(f"Paper confirm (holdings): SELL {db_order.symbol} @ {sell_price:,} x {db_order.qty}")
+                    except Exception as e:
+                        logger.error(f"Paper confirm failed for {db_order.symbol}: {e}")
+            except Exception as e:
+                logger.warning(f"Paper confirm fallback failed: {e}")
+
         await session.commit()
         return results
 
