@@ -19,8 +19,8 @@ class KISOrderAPI:
     """한투 주문 API 래퍼."""
 
     TR_IDS = {
-        "paper": {"buy": "VTTC0802U", "sell": "VTTC0801U"},
-        "real": {"buy": "TTTC0802U", "sell": "TTTC0801U"},
+        "paper": {"buy": "VTTC0012U", "sell": "VTTC0011U"},
+        "real": {"buy": "TTTC0012U", "sell": "TTTC0011U"},
     }
 
     def __init__(self, client: KISClient):
@@ -45,7 +45,7 @@ class KISOrderAPI:
     async def cancel_order(self, order_no: str, qty: int) -> OrderResult:
         """주문 취소."""
         env = self.client.config.env
-        tr_id = "VTTC0803U" if env == "paper" else "TTTC0803U"
+        tr_id = "VTTC0013U" if env == "paper" else "TTTC0013U"
 
         body = {
             "CANO": self.client.config.account_prefix,
