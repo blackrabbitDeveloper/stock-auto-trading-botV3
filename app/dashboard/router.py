@@ -178,6 +178,28 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
             strategy_summary[pos.strategy] = {"active": 0, "pending_buy": 0, "pending_sell": 0}
         strategy_summary[pos.strategy][pos.status] += 1
 
+    # Strategy performance stats from trades
+    all_trades = (await session.execute(select(Trade).order_by(desc(Trade.created_at)))).scalars().all()
+    strategy_stats = {}
+    for t in all_trades:
+        s = strategy_stats.setdefault(t.strategy, {"count": 0, "wins": 0, "total_pnl": 0, "total_return": 0.0})
+        s["count"] += 1
+        if t.pnl > 0:
+            s["wins"] += 1
+        s["total_pnl"] += t.pnl
+        s["total_return"] += t.return_pct
+    for s in strategy_stats.values():
+        s["win_rate"] = (s["wins"] / s["count"] * 100) if s["count"] > 0 else 0
+        s["avg_return"] = (s["total_return"] / s["count"] * 100) if s["count"] > 0 else 0
+
+    # Job history & WS status
+    job_history = getattr(request.app.state, "job_history", {})
+    ws_status = {
+        "connected": sl_monitor._running if sl_monitor else False,
+        "watching": len(sl_monitor._positions) if sl_monitor else 0,
+        "prices_count": len(sl_monitor.current_prices) if sl_monitor else 0,
+    }
+
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "account": account,
@@ -189,6 +211,10 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
         "orders": orders,
         "strategy_summary": strategy_summary,
         "current_prices": current_prices,
+        "job_history": job_history,
+        "ws_status": ws_status,
+        "strategy_stats": strategy_stats,
+        "trading_paused": getattr(request.app.state, "trading_paused", False),
     })
 
 

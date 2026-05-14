@@ -128,10 +128,35 @@ async def lifespan(app: FastAPI):
     app.state.executor = executor
     app.state.notifier = notifier
     app.state.strategy_configs = strategy_configs
+    app.state.job_history = {}  # {job_id: {last_run, status, message, duration_s}}
+    app.state.trading_paused = False
 
     # Schedule jobs
     market_filter_config = MarketFilterConfig()
     universe_config = UniverseConfig()
+
+    async def _track_job(job_id: str, coro):
+        """Run a job coroutine and record execution result in app.state.job_history."""
+        import time
+        start = time.monotonic()
+        try:
+            await coro
+            elapsed = time.monotonic() - start
+            app.state.job_history[job_id] = {
+                "last_run": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M:%S"),
+                "status": "ok",
+                "message": "",
+                "duration_s": round(elapsed, 1),
+            }
+        except Exception as e:
+            elapsed = time.monotonic() - start
+            app.state.job_history[job_id] = {
+                "last_run": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M:%S"),
+                "status": "error",
+                "message": str(e)[:100],
+                "duration_s": round(elapsed, 1),
+            }
+            logger.error(f"Job {job_id} failed: {e}", exc_info=True)
 
     async def _build_sl_pos_map(session) -> dict[str, dict]:
         """Build position map for SL monitor (all active positions).
@@ -159,6 +184,9 @@ async def lifespan(app: FastAPI):
     async def _signal_job():
         if not _is_trading_day():
             return
+        if app.state.trading_paused:
+            logger.info("Signal job skipped — trading paused")
+            return
         async with db_module.async_session_factory() as session:
             await run_signal_job(session, strategy_configs, market_filter_config, universe_config, notifier, real_client)
         # Update SL monitor with latest positions
@@ -169,6 +197,9 @@ async def lifespan(app: FastAPI):
 
     async def _order_job():
         if not _is_trading_day():
+            return
+        if app.state.trading_paused:
+            logger.info("Order job skipped — trading paused")
             return
         async with sell_lock, db_module.async_session_factory() as session:
             await run_order_job(session, executor, strategy_configs, notifier)
@@ -229,16 +260,20 @@ async def lifespan(app: FastAPI):
             if sl_monitor:
                 await sl_monitor.update_positions(pos_map)
 
-    scheduler.add_job(_trail_update_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=50), id="trail_update", misfire_grace_time=60)
-    scheduler.add_job(_signal_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=40), id="signal_job", misfire_grace_time=300)
-    scheduler.add_job(_order_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=59), id="order_job", misfire_grace_time=60)
-    # 모의투자: 09:00 개장 즉시 체결 → 09:01 early confirm (entry_price/sl_price 빠른 설정)
+    def _tracked(job_id, fn):
+        async def wrapper():
+            await _track_job(job_id, fn())
+        return wrapper
+
+    scheduler.add_job(_tracked("trail_update", _trail_update_job), CronTrigger(day_of_week="mon-fri", hour=8, minute=50), id="trail_update", misfire_grace_time=60)
+    scheduler.add_job(_tracked("signal_job", _signal_job), CronTrigger(day_of_week="mon-fri", hour=15, minute=40), id="signal_job", misfire_grace_time=300)
+    scheduler.add_job(_tracked("order_job", _order_job), CronTrigger(day_of_week="mon-fri", hour=8, minute=59), id="order_job", misfire_grace_time=60)
     if kis_config.env == "paper":
-        scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=1), id="confirm_job_early", misfire_grace_time=60)
-    scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
-    scheduler.add_job(_confirm_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=30), id="confirm_job_retry", misfire_grace_time=60)
-    scheduler.add_job(_refresh_token, CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="token_refresh")
-    scheduler.add_job(_refresh_token, CronTrigger(day_of_week="mon-fri", hour=20, minute=0), id="token_refresh_evening")
+        scheduler.add_job(_tracked("confirm_job", _confirm_job), CronTrigger(day_of_week="mon-fri", hour=9, minute=1), id="confirm_job_early", misfire_grace_time=60)
+    scheduler.add_job(_tracked("confirm_job", _confirm_job), CronTrigger(day_of_week="mon-fri", hour=9, minute=5), id="confirm_job", misfire_grace_time=60)
+    scheduler.add_job(_tracked("confirm_job", _confirm_job), CronTrigger(day_of_week="mon-fri", hour=9, minute=30), id="confirm_job_retry", misfire_grace_time=60)
+    scheduler.add_job(_tracked("token_refresh", _refresh_token), CronTrigger(day_of_week="mon-fri", hour=8, minute=0), id="token_refresh")
+    scheduler.add_job(_tracked("token_refresh", _refresh_token), CronTrigger(day_of_week="mon-fri", hour=20, minute=0), id="token_refresh_evening")
 
     async def _stale_order_cleanup():
         if not _is_trading_day():
@@ -246,7 +281,7 @@ async def lifespan(app: FastAPI):
         async with db_module.async_session_factory() as session:
             await run_stale_order_cleanup(session, notifier)
 
-    scheduler.add_job(_stale_order_cleanup, CronTrigger(day_of_week="mon-fri", hour=15, minute=35), id="stale_order_cleanup", misfire_grace_time=300)
+    scheduler.add_job(_tracked("stale_cleanup", _stale_order_cleanup), CronTrigger(day_of_week="mon-fri", hour=15, minute=35), id="stale_order_cleanup", misfire_grace_time=300)
 
     async def _position_sync():
         if not _is_trading_day():
@@ -259,7 +294,7 @@ async def lifespan(app: FastAPI):
             if sl_monitor:
                 await sl_monitor.update_positions(pos_map)
 
-    scheduler.add_job(_position_sync, CronTrigger(day_of_week="mon-fri", hour=9, minute=35), id="position_sync", misfire_grace_time=60)
+    scheduler.add_job(_tracked("position_sync", _position_sync), CronTrigger(day_of_week="mon-fri", hour=9, minute=35), id="position_sync", misfire_grace_time=60)
 
     # WebSocket SL monitor
     from app.broker.websocket import StopLossMonitor
@@ -407,6 +442,23 @@ async def trigger_job(job_name: str, request: Request):
     from zoneinfo import ZoneInfo
     job.modify(next_run_time=datetime.now(ZoneInfo("Asia/Seoul")))
     return {"status": "triggered", "job": job_name}
+
+
+@app.post("/toggle-trading")
+async def toggle_trading(request: Request):
+    """거래 일시정지/재개 토글."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            raise HTTPException(status_code=401)
+    app.state.trading_paused = not app.state.trading_paused
+    state = "paused" if app.state.trading_paused else "active"
+    logger.info(f"Trading toggled: {state}")
+    notifier = getattr(app.state, "notifier", None)
+    if notifier:
+        await notifier.send(f"{'⏸️' if app.state.trading_paused else '▶️'} 거래 {'일시정지' if app.state.trading_paused else '재개'}")
+    return {"status": state}
 
 
 @app.post("/reset-positions")

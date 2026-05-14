@@ -49,6 +49,17 @@
             alert(e.message);
         }
     }
+    async function toggleTrading() {
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        const btn = event.target;
+        btn.disabled = true;
+        try {
+            const resp = await fetch(`/toggle-trading?token=${token}`, {method: 'POST'});
+            const data = await resp.json();
+            btn.textContent = data.status === 'paused' ? '▶️ 재개' : '⏸ 일시정지';
+            setTimeout(() => location.reload(), 1000);
+        } catch(e) { alert(e.message); }
+    }
     async function triggerJob(jobName) {
         const token = new URLSearchParams(window.location.search).get('token') || '';
         const btn = event.target;
@@ -79,7 +90,9 @@
                 <button onclick="triggerJob('signal_job')" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm font-medium">📡 시그널 스캔</button>
                 <button onclick="triggerJob('order_job')" class="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded text-sm font-medium">💰 주문 실행</button>
                 <button onclick="triggerJob('confirm_job')" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 rounded text-sm font-medium">✅ 체결 확인</button>
+                <button onclick="triggerJob('position_sync')" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 rounded text-sm font-medium">🔄 포지션 동기화</button>
                 <button onclick="syncPrices()" class="px-3 py-1.5 bg-yellow-600 hover:bg-yellow-500 rounded text-sm font-medium">🔄 매수가 동기화</button>
+                <button onclick="toggleTrading()" class="px-3 py-1.5 {% if trading_paused %}bg-green-600 hover:bg-green-500{% else %}bg-orange-600 hover:bg-orange-500{% endif %} rounded text-sm font-medium">{% if trading_paused %}▶️ 재개{% else %}⏸ 일시정지{% endif %}</button>
                 <button onclick="resetPositions()" class="px-3 py-1.5 bg-red-700 hover:bg-red-600 rounded text-sm font-medium">🗑 초기화</button>
             </div>
         </div>
@@ -117,9 +130,57 @@
             {% endif %}
         </div>
 
-        <!-- Strategy Summary -->
+        <!-- System Status: Jobs + WebSocket -->
+        <div class="bg-gray-800 rounded-lg p-4 mb-6">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-lg font-semibold">시스템 상태</h2>
+                <div class="flex items-center gap-2">
+                    {% if trading_paused %}
+                    <span class="px-2 py-1 bg-orange-800 text-orange-300 text-xs rounded">거래 정지</span>
+                    {% endif %}
+                    {% if ws_status.connected %}
+                    <span class="px-2 py-1 bg-green-800 text-green-300 text-xs rounded">WS 연결</span>
+                    {% else %}
+                    <span class="px-2 py-1 bg-red-800 text-red-300 text-xs rounded">WS 끊김</span>
+                    {% endif %}
+                    <span class="text-xs text-gray-400">감시 {{ ws_status.watching }}종목 | 시세 {{ ws_status.prices_count }}종목</span>
+                </div>
+            </div>
+            <div class="grid grid-cols-3 md:grid-cols-7 gap-2 text-xs">
+                {% set jobs = [
+                    ("trail_update", "Trail갱신", "08:50"),
+                    ("order_job", "주문실행", "08:59"),
+                    ("confirm_job", "체결확인", "09:05"),
+                    ("position_sync", "포지션동기화", "09:35"),
+                    ("stale_cleanup", "미체결정리", "15:35"),
+                    ("signal_job", "시그널스캔", "15:40"),
+                    ("token_refresh", "토큰갱신", "08:00"),
+                ] %}
+                {% for job_id, label, schedule in jobs %}
+                {% set j = job_history.get(job_id, {}) %}
+                <div class="bg-gray-700/50 rounded p-2 text-center">
+                    <div class="text-gray-400 mb-1">{{ label }}</div>
+                    {% if j %}
+                    <div class="font-mono {% if j.status == 'ok' %}text-green-400{% else %}text-red-400{% endif %}">
+                        {{ j.last_run }}
+                    </div>
+                    <div class="text-gray-500">{{ j.duration_s }}s</div>
+                    {% if j.status == 'error' %}
+                    <div class="text-red-400 truncate" title="{{ j.message }}">{{ j.message[:20] }}</div>
+                    {% endif %}
+                    {% else %}
+                    <div class="text-gray-500">{{ schedule }}</div>
+                    <div class="text-gray-600">대기</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Strategy Summary + Performance -->
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
             {% for name, info in strategy_summary.items() %}
+            {% set stats = strategy_stats.get(name, {}) %}
             <div class="bg-gray-800 rounded-lg p-4">
                 <div class="text-sm text-gray-400">{{ name }}</div>
                 <div class="text-lg font-bold">{{ info.active }} 보유</div>
@@ -128,6 +189,13 @@
                 {% endif %}
                 {% if info.pending_sell > 0 %}
                 <div class="text-sm text-red-400">{{ info.pending_sell }} 매도대기</div>
+                {% endif %}
+                {% if stats.count is defined and stats.count > 0 %}
+                <div class="mt-2 pt-2 border-t border-gray-700 text-xs text-gray-400">
+                    <span>{{ stats.count }}거래</span>
+                    <span class="ml-2 {% if stats.win_rate >= 50 %}text-green-400{% else %}text-red-400{% endif %}">승률 {{ "{:.0f}".format(stats.win_rate) }}%</span>
+                    <span class="ml-2 {% if stats.total_pnl >= 0 %}text-green-400{% else %}text-red-400{% endif %}">{{ "{:+,}".format(stats.total_pnl) }}</span>
+                </div>
                 {% endif %}
             </div>
             {% endfor %}
