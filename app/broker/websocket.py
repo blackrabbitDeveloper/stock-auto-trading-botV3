@@ -187,6 +187,7 @@ class StopLossMonitor:
             return
 
         pos = self._positions[symbol]
+
         sl_price = pos.get("sl_price", 0)
         trail_price = pos.get("trail_price", 0)
         exit_trigger = max(sl_price, trail_price)

@@ -146,9 +146,12 @@ async def lifespan(app: FastAPI):
         positions = result.scalars().all()
         pos_map = {}
         for p in positions:
+            config = strategy_configs.get(p.strategy)
             pos_map[p.symbol] = {
                 "sl_price": p.sl_price or 0,
                 "trail_price": p.trail_price or 0,
+                "peak_price": p.peak_price or 0,
+                "trailing_stop_pct": config.trailing_stop_pct if config else 0.05,
                 "qty": p.qty or 0,
             }
         return pos_map
@@ -196,6 +199,37 @@ async def lifespan(app: FastAPI):
             logger.error(f"Token refresh failed: {e}")
             await notifier.send_error(f"Token refresh failed: {e}")
 
+    async def _trail_update_job():
+        """아침 장 시작 전 trail_price 갱신 (전일 peak 기준)."""
+        if not _is_trading_day():
+            return
+        async with db_module.async_session_factory() as session:
+            from app.models.position import Position
+            result = await session.execute(
+                select(Position).where(Position.status == "active")
+            )
+            positions = result.scalars().all()
+            updated = []
+            for pos in positions:
+                config = strategy_configs.get(pos.strategy)
+                if not config or not pos.peak_price:
+                    continue
+                if pos.holding_days <= (config.sl_skip_days if config else 2):
+                    continue
+                new_trail = int(pos.peak_price * (1 - config.trailing_stop_pct))
+                if new_trail != (pos.trail_price or 0):
+                    pos.trail_price = new_trail
+                    updated.append(f"{pos.symbol}: trail={new_trail:,}")
+            await session.commit()
+            if updated:
+                logger.info(f"Trail update: {', '.join(updated)}")
+        # Refresh SL monitor
+        async with db_module.async_session_factory() as session:
+            pos_map = await _build_sl_pos_map(session)
+            if sl_monitor:
+                await sl_monitor.update_positions(pos_map)
+
+    scheduler.add_job(_trail_update_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=50), id="trail_update", misfire_grace_time=60)
     scheduler.add_job(_signal_job, CronTrigger(day_of_week="mon-fri", hour=15, minute=40), id="signal_job", misfire_grace_time=300)
     scheduler.add_job(_order_job, CronTrigger(day_of_week="mon-fri", hour=8, minute=59), id="order_job", misfire_grace_time=60)
     # 모의투자: 09:00 개장 즉시 체결 → 09:01 early confirm (entry_price/sl_price 빠른 설정)
