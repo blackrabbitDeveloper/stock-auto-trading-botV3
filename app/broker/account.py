@@ -17,6 +17,14 @@ class AccountBalance:
 
 
 @dataclass
+class BrokerHolding:
+    symbol: str
+    name: str
+    qty: int
+    avg_price: int
+
+
+@dataclass
 class FilledOrder:
     order_no: str
     symbol: str
@@ -61,6 +69,39 @@ class KISAccountAPI:
             stock_eval=int(summary.get("scts_evlu_amt", 0)),
             pnl_today=int(summary.get("evlu_pfls_smtl_amt", 0)),
         )
+
+    async def get_holdings(self) -> list[BrokerHolding]:
+        """실제 계좌 보유종목 조회."""
+        env = self.client.config.env
+        tr_id = "VTTC8434R" if env == "paper" else "TTTC8434R"
+
+        params = {
+            "CANO": self.client.config.account_prefix,
+            "ACNT_PRDT_CD": self.client.config.account_suffix,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+
+        data = await self.client.request("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", tr_id, params=params)
+        results = []
+        for item in data.get("output1", []):
+            qty = int(item.get("hldg_qty", 0))
+            if qty <= 0:
+                continue
+            results.append(BrokerHolding(
+                symbol=item.get("pdno", ""),
+                name=item.get("prdt_name", ""),
+                qty=qty,
+                avg_price=int(float(item.get("pchs_avg_pric", "0"))),
+            ))
+        return results
 
     async def get_filled_orders(self, date_str: str) -> list[FilledOrder]:
         """당일 체결 내역 조회."""

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.trader.executor import OrderExecutor
 from app.notifier.discord import DiscordNotifier
+from app.broker.account import KISAccountAPI
 from app.models.order import Order
 from app.models.position import Position
 
@@ -105,3 +106,82 @@ async def run_stale_order_cleanup(
     msg = f"🧹 장마감 미체결 정리: {len(stale_orders)}건\n" + "\n".join(cleaned)
     await notifier.send(msg)
     logger.info(f"Stale order cleanup: {len(stale_orders)} orders cancelled")
+
+
+async def run_position_sync(
+    session: AsyncSession,
+    account_api: KISAccountAPI,
+    notifier: DiscordNotifier,
+):
+    """DB ↔ 브로커 계좌 포지션 동기화 (09:35 실행).
+
+    - 계좌에 없는데 DB에 active/pending_sell → 포지션 삭제
+    - 계좌에 있는데 DB에 없음 → 포지션 생성 (미등록 상태)
+    """
+    logger.info("Position sync started")
+
+    try:
+        broker_holdings = await account_api.get_holdings()
+    except Exception as e:
+        logger.error(f"Position sync failed (API error): {e}")
+        return
+
+    broker_map = {h.symbol: h for h in broker_holdings}
+
+    stmt = select(Position).where(Position.status.in_(["active", "pending_sell"]))
+    db_positions = (await session.execute(stmt)).scalars().all()
+    db_map = {p.symbol: p for p in db_positions}
+
+    actions = []
+
+    # Case A: DB에 있는데 계좌에 없음 → 이미 매도됨
+    for pos in db_positions:
+        if pos.symbol not in broker_map:
+            # submitted 매도 주문이 있으면 아직 체결 대기 중일 수 있음 → 건너뜀
+            pending_sell_order = await session.execute(
+                select(func.count()).select_from(Order).where(
+                    Order.position_id == pos.id,
+                    Order.side == "sell",
+                    Order.status == "submitted",
+                )
+            )
+            if pending_sell_order.scalar_one() > 0:
+                continue
+
+            from sqlalchemy import update as sql_update
+            await session.execute(
+                sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+            )
+            await session.delete(pos)
+            actions.append(f"  삭제: {pos.symbol} {pos.name} ({pos.status}) — 계좌에 없음")
+
+    # Case B: 계좌에 있는데 DB에 없음 → 미등록 종목
+    all_db_symbols = set(
+        (await session.execute(
+            select(Position.symbol).where(Position.status.in_(["active", "pending_buy", "pending_sell"]))
+        )).scalars().all()
+    )
+    for symbol, holding in broker_map.items():
+        if symbol not in all_db_symbols:
+            new_pos = Position(
+                strategy="manual",
+                symbol=holding.symbol,
+                name=holding.name,
+                status="active",
+                signal_date=date.today(),
+                entry_date=date.today(),
+                entry_price=holding.avg_price,
+                qty=holding.qty,
+                peak_price=holding.avg_price,
+            )
+            session.add(new_pos)
+            actions.append(f"  생성: {holding.symbol} {holding.name} @ {holding.avg_price:,} x {holding.qty} (manual)")
+
+    await session.commit()
+
+    if actions:
+        msg = f"🔄 포지션 동기화: {len(actions)}건\n" + "\n".join(actions)
+        await notifier.send(msg)
+        logger.info(f"Position sync: {len(actions)} actions")
+    else:
+        logger.info("Position sync: no mismatches")

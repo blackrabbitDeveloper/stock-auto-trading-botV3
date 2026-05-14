@@ -21,7 +21,7 @@ from app.trader import OrderExecutor, SLManager
 from app.notifier import DiscordNotifier
 from app.dashboard import router as dashboard_router
 from app.jobs import run_signal_job, run_order_job, run_confirm_job
-from app.jobs.confirm_job import run_stale_order_cleanup
+from app.jobs.confirm_job import run_stale_order_cleanup, run_position_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -247,6 +247,19 @@ async def lifespan(app: FastAPI):
             await run_stale_order_cleanup(session, notifier)
 
     scheduler.add_job(_stale_order_cleanup, CronTrigger(day_of_week="mon-fri", hour=15, minute=35), id="stale_order_cleanup", misfire_grace_time=300)
+
+    async def _position_sync():
+        if not _is_trading_day():
+            return
+        async with db_module.async_session_factory() as session:
+            await run_position_sync(session, account_api, notifier)
+        # Refresh SL monitor after sync
+        async with db_module.async_session_factory() as session:
+            pos_map = await _build_sl_pos_map(session)
+            if sl_monitor:
+                await sl_monitor.update_positions(pos_map)
+
+    scheduler.add_job(_position_sync, CronTrigger(day_of_week="mon-fri", hour=9, minute=35), id="position_sync", misfire_grace_time=60)
 
     # WebSocket SL monitor
     from app.broker.websocket import StopLossMonitor
