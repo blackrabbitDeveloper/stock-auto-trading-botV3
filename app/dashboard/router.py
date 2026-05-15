@@ -192,6 +192,10 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
     for s in strategy_stats.values():
         s["win_rate"] = (s["wins"] / s["count"] * 100) if s["count"] > 0 else 0
         s["avg_return"] = (s["total_return"] / s["count"] * 100) if s["count"] > 0 else 0
+    # Trade에만 있는 전략도 strategy_summary에 추가
+    for strat_name in strategy_stats:
+        if strat_name not in strategy_summary:
+            strategy_summary[strat_name] = {"active": 0, "pending_buy": 0, "pending_sell": 0}
 
     # Job history & WS status
     job_history = getattr(request.app.state, "job_history", {})

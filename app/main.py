@@ -675,6 +675,14 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         select(Order).where(Order.status == "filled").order_by(Order.submitted_at)
     )).scalars().all()
 
+    # 종목명 조회용 (Order.name이 비어있을 때 fallback)
+    name_map = {}
+    for h in holdings:
+        name_map[h.symbol] = h.name
+    for p in active_positions:
+        if p.name:
+            name_map[p.symbol] = p.name
+
     # symbol별로 매수/매도 그룹핑
     from collections import defaultdict
     buys_by_sym = defaultdict(list)
@@ -722,10 +730,11 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
             exit_date = (sell_order.submitted_at.date() if sell_order.submitted_at else today_kst.date())
             hold_days = (exit_date - entry_date).days
 
+            stock_name = matched_buy.name or name_map.get(symbol, symbol)
             trade = Trade(
                 strategy=matched_buy.strategy or "unknown",
                 symbol=symbol,
-                name=matched_buy.name or symbol,
+                name=stock_name,
                 entry_date=entry_date,
                 exit_date=exit_date,
                 entry_price=entry_price,
