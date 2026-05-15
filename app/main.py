@@ -561,6 +561,8 @@ async def toggle_trading(request: Request):
 @app.post("/api/recover-fills")
 async def recover_fills(request: Request, session: AsyncSession = Depends(get_session)):
     """cancelled 주문을 API 체결 데이터와 매칭하여 소급 보정."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
     settings = AppSettings()
     if settings.dashboard_token:
         token = request.query_params.get("token", "")
