@@ -424,6 +424,38 @@ async def health():
     return {"status": "ok", "jobs": jobs}
 
 
+@app.get("/api/token-cache")
+async def token_cache_status(request: Request):
+    """토큰 캐시 상태 확인 (디버깅용)."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401)
+    from app.models.token_cache import TokenCache
+    from app.models import database as db_module
+    result = {}
+    if db_module.async_session_factory:
+        async with db_module.async_session_factory() as session:
+            for env in ["real", "paper"]:
+                row = await session.get(TokenCache, env)
+                if row:
+                    from datetime import timezone
+                    age = (datetime.now(ZoneInfo("Asia/Seoul")) - row.issued_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Seoul")))
+                    result[env] = {
+                        "has_token": bool(row.token),
+                        "token_prefix": row.token[:20] + "..." if row.token else "",
+                        "issued_at": str(row.issued_at),
+                        "age_minutes": round(age.total_seconds() / 60, 1),
+                    }
+                else:
+                    result[env] = {"has_token": False, "reason": "no row in DB"}
+    else:
+        result["error"] = "async_session_factory is None"
+    return result
+
+
 @app.post("/trigger/{job_name}")
 async def trigger_job(job_name: str, request: Request):
     """수동으로 job 트리거 (예: POST /trigger/signal_job?token=xxx)."""

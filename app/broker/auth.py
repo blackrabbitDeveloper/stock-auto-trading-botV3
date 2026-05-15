@@ -37,7 +37,7 @@ async def _load_cached_token(config: KISConfig) -> str:
                         _mem_cache[env] = (row.token, time.time())
                         return row.token
     except Exception as e:
-        logger.debug(f"DB token cache read failed: {e}")
+        logger.warning(f"DB token cache read failed: {e}")
     # Fallback to memory
     if env in _mem_cache:
         token, ts = _mem_cache[env]
