@@ -32,7 +32,7 @@ async def _load_cached_token(config: KISConfig) -> str:
             async with db_module.async_session_factory() as session:
                 row = await session.get(TokenCache, env)
                 if row:
-                    age = (datetime.now(timezone.utc) - row.issued_at.replace(tzinfo=timezone.utc)).total_seconds()
+                    age = (datetime.now(timezone.utc).replace(tzinfo=None) - row.issued_at).total_seconds()
                     if age < TOKEN_MAX_AGE:
                         _mem_cache[env] = (row.token, time.time())
                         return row.token
@@ -59,12 +59,12 @@ async def _save_token_cache(config: KISConfig, token: str):
             existing = await session.get(TokenCache, env)
             if existing:
                 existing.token = token
-                existing.issued_at = datetime.now(timezone.utc)
+                existing.issued_at = datetime.now(timezone.utc).replace(tzinfo=None)
             else:
                 session.add(TokenCache(
                     env=env,
                     token=token,
-                    issued_at=datetime.now(timezone.utc),
+                    issued_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 ))
             await session.commit()
     except Exception as e:
