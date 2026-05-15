@@ -59,11 +59,9 @@ class KISClient:
                 # Token expired — clear cache and get new token
                 if resp.status_code == 401 or data.get("msg_cd") == "EGW00123":
                     if attempt == 0:
-                        from app.broker.auth import _cache_path
-                        cache = _cache_path(self.config)
-                        if cache.exists():
-                            cache.unlink()
-                            logger.info(f"Cleared expired token cache: {cache.name}")
+                        from app.broker.auth import _save_token_cache, _env_key
+                        logger.info(f"Token expired, clearing cache ({_env_key(self.config)})")
+                        await _save_token_cache(self.config, "")  # invalidate
                         await self.refresh_token()
                         headers = self._headers(tr_id)
                         continue

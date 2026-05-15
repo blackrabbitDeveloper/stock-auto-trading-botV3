@@ -49,6 +49,26 @@
             alert(e.message);
         }
     }
+    async function cancelSell(posId, name) {
+        if (!confirm(`${name} 매도를 취소하고 보유로 복구하시겠습니까?`)) return;
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        try {
+            const resp = await fetch(`/api/cancel-sell/${posId}?token=${token}`, {method: 'POST'});
+            if (resp.ok) {
+                document.getElementById(`sell-row-${posId}`).remove();
+            } else { alert('실패: ' + (await resp.json()).detail); }
+        } catch(e) { alert(e.message); }
+    }
+    async function deletePosition(posId, name) {
+        if (!confirm(`${name} 포지션을 DB에서 삭제하시겠습니까?`)) return;
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        try {
+            const resp = await fetch(`/api/delete-position/${posId}?token=${token}`, {method: 'POST'});
+            if (resp.ok) {
+                document.getElementById(`sell-row-${posId}`).remove();
+            } else { alert('실패: ' + (await resp.json()).detail); }
+        } catch(e) { alert(e.message); }
+    }
     async function toggleTrading() {
         const token = new URLSearchParams(window.location.search).get('token') || '';
         const btn = event.target;
@@ -251,15 +271,20 @@
                             <th class="text-left">전략</th>
                             <th class="text-right">매수가</th>
                             <th class="text-left">사유</th>
+                            <th class="text-right"></th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for pos in pending_sells %}
-                        <tr class="border-b border-gray-700/50">
+                        <tr class="border-b border-gray-700/50" id="sell-row-{{ pos.id }}">
                             <td class="py-2 font-medium"><a href="https://m.stock.naver.com/domestic/stock/{{ pos.symbol }}/total" target="_blank" class="hover:text-blue-400 underline decoration-gray-600">{{ pos.symbol }} {{ pos.name }}</a></td>
                             <td>{{ pos.strategy }}</td>
                             <td class="text-right">{{ "{:,}".format(pos.entry_price or 0) }}</td>
                             <td>{{ pos.exit_reason }}</td>
+                            <td class="text-right">
+                                <button onclick="cancelSell({{ pos.id }}, '{{ pos.name }}')" class="px-2 py-1 text-xs bg-gray-700 hover:bg-yellow-700 text-gray-300 hover:text-white rounded transition">매도취소</button>
+                                <button onclick="deletePosition({{ pos.id }}, '{{ pos.name }}')" class="px-2 py-1 text-xs bg-gray-700 hover:bg-red-700 text-gray-300 hover:text-white rounded transition ml-1">삭제</button>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>

@@ -61,7 +61,7 @@ async def run_signal_job(
     market_open = await _check_market_filter_api(market_api, market_filter_config)
 
     # Get all currently held/pending symbols across all strategies
-    stmt = select(Position.symbol).where(Position.status.in_(["active", "pending_buy"]))
+    stmt = select(Position.symbol).where(Position.status.in_(["active", "pending_buy", "pending_sell"]))
     existing_symbols = set((await session.execute(stmt)).scalars().all())
 
     alerts = {"date": today_str, "pending_buys": [], "pending_sells": []}

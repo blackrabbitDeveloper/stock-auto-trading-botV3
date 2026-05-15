@@ -124,6 +124,23 @@ async def run_position_sync(
         broker_holdings = await account_api.get_holdings()
     except Exception as e:
         logger.error(f"Position sync failed (API error): {e}")
+        # API 실패해도 sl_sell_unconfirmed 포지션은 정리 (이미 매도 확인 불가 상태)
+        stmt = select(Position).where(
+            Position.status == "pending_sell",
+            Position.exit_reason == "sl_sell_unconfirmed",
+        )
+        stale = (await session.execute(stmt)).scalars().all()
+        if stale:
+            from sqlalchemy import update as sql_update
+            for pos in stale:
+                await session.execute(
+                    sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+                )
+                await session.delete(pos)
+            await session.commit()
+            names = [f"{p.symbol} {p.name}" for p in stale]
+            await notifier.send(f"🧹 sl_sell_unconfirmed 자동 정리: {', '.join(names)}")
+            logger.info(f"Cleaned {len(stale)} sl_sell_unconfirmed positions despite API failure")
         return
 
     broker_map = {h.symbol: h for h in broker_holdings}

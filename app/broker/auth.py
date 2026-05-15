@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
-from pathlib import Path
+from datetime import datetime, timezone
 
 import httpx
 
@@ -11,43 +10,72 @@ from app.config import KISConfig
 
 logger = logging.getLogger(__name__)
 
-TOKEN_CACHE_DIR = Path("data")
-TOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TOKEN_MAX_AGE = 23 * 3600  # 23h (token valid 24h, use buffer)
+
+# In-memory fallback (used when DB not available, e.g. during startup)
+_mem_cache: dict[str, tuple[str, float]] = {}
 
 
-def _cache_path(config: KISConfig) -> Path:
-    """Per-environment token cache file."""
-    env = "real" if "openapi.koreainvestment" in config.base_url and "vts" not in config.base_url else "paper"
-    return TOKEN_CACHE_DIR / f"token_{env}.json"
+def _env_key(config: KISConfig) -> str:
+    """Per-environment cache key."""
+    return "real" if "openapi.koreainvestment" in config.base_url and "vts" not in config.base_url else "paper"
 
 
-def _load_cached_token(config) -> str:
-    """Load token from file cache if still valid."""
-    path = _cache_path(config)
-    if not path.exists():
-        return ""
+async def _load_cached_token(config: KISConfig) -> str:
+    """Load token from DB (primary) or memory (fallback)."""
+    env = _env_key(config)
+    # Try DB first
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        # Token valid for 24h, use 23h buffer
-        if time.time() - data.get("ts", 0) < 23 * 3600:
-            return data.get("token", "")
-    except Exception:
-        pass
+        from app.models import async_session_factory
+        if async_session_factory:
+            from app.models.token_cache import TokenCache
+            async with async_session_factory() as session:
+                row = await session.get(TokenCache, env)
+                if row:
+                    age = (datetime.now(timezone.utc) - row.issued_at.replace(tzinfo=timezone.utc)).total_seconds()
+                    if age < TOKEN_MAX_AGE:
+                        _mem_cache[env] = (row.token, time.time())
+                        return row.token
+    except Exception as e:
+        logger.debug(f"DB token cache read failed: {e}")
+    # Fallback to memory
+    if env in _mem_cache:
+        token, ts = _mem_cache[env]
+        if time.time() - ts < TOKEN_MAX_AGE:
+            return token
     return ""
 
 
-def _save_token_cache(config, token: str):
-    """Save token to file cache."""
-    path = _cache_path(config)
-    path.write_text(json.dumps({"token": token, "ts": time.time()}), encoding="utf-8")
+async def _save_token_cache(config: KISConfig, token: str):
+    """Save token to DB + memory."""
+    env = _env_key(config)
+    _mem_cache[env] = (token, time.time())
+    try:
+        from app.models import async_session_factory
+        if not async_session_factory:
+            return
+        from app.models.token_cache import TokenCache
+        async with async_session_factory() as session:
+            existing = await session.get(TokenCache, env)
+            if existing:
+                existing.token = token
+                existing.issued_at = datetime.now(timezone.utc)
+            else:
+                session.add(TokenCache(
+                    env=env,
+                    token=token,
+                    issued_at=datetime.now(timezone.utc),
+                ))
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"DB token cache write failed (memory cache still active): {e}")
 
 
-async def get_access_token(config, client: httpx.AsyncClient) -> str:
-    """Get or refresh OAuth access token (24h validity). File-cached."""
-    # Check file cache first
-    cached = _load_cached_token(config)
+async def get_access_token(config: KISConfig, client: httpx.AsyncClient) -> str:
+    """Get or refresh OAuth access token (24h validity). DB-cached."""
+    cached = await _load_cached_token(config)
     if cached:
-        logger.info(f"Using cached token ({_cache_path(config).name})")
+        logger.info(f"Using cached token ({_env_key(config)})")
         return cached
 
     path = "/oauth2/tokenP"
@@ -68,13 +96,18 @@ async def get_access_token(config, client: httpx.AsyncClient) -> str:
         raise RuntimeError(f"Token request failed: {data}")
 
     token = data["access_token"]
-    _save_token_cache(config, token)
+    await _save_token_cache(config, token)
 
-    logger.info(f"New token issued and cached ({_cache_path(config).name})")
+    logger.info(f"New token issued and cached ({_env_key(config)})")
     return token
 
 
 def clear_token_cache():
     """Clear all cached tokens (for testing)."""
-    for f in TOKEN_CACHE_DIR.glob("token_*.json"):
-        f.unlink()
+    _mem_cache.clear()
+    # File cache cleanup (legacy)
+    from pathlib import Path
+    cache_dir = Path("data")
+    if cache_dir.exists():
+        for f in cache_dir.glob("token_*.json"):
+            f.unlink()

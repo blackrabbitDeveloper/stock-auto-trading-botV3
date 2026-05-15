@@ -218,6 +218,33 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
     })
 
 
+@router.post("/api/cancel-sell/{position_id}")
+async def cancel_pending_sell(position_id: int, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
+    """매도 예정 포지션을 active로 복구 (매도 취소)."""
+    pos = await session.get(Position, position_id)
+    if not pos or pos.status != "pending_sell":
+        raise HTTPException(status_code=404, detail="Position not found or not pending_sell")
+    pos.status = "active"
+    pos.exit_reason = None
+    await session.commit()
+    return {"ok": True, "symbol": pos.symbol, "name": pos.name}
+
+
+@router.post("/api/delete-position/{position_id}")
+async def delete_position(position_id: int, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
+    """유령 포지션 삭제 (계좌에 없는 DB 레코드 정리)."""
+    pos = await session.get(Position, position_id)
+    if not pos:
+        raise HTTPException(status_code=404, detail="Position not found")
+    from sqlalchemy import update as sql_update
+    await session.execute(
+        sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+    )
+    await session.delete(pos)
+    await session.commit()
+    return {"ok": True, "symbol": pos.symbol, "name": pos.name}
+
+
 @router.get("/api/status")
 async def api_status(session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
     stmt = select(func.count()).select_from(Position).where(Position.status == "active")
