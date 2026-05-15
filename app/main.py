@@ -651,20 +651,93 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         detail = f" ({', '.join(changes)})" if changes else ""
         recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}{detail}")
 
-    # 3) 잘못 생성된 Trade 정리 (브로커에 보유 중인 종목의 매도 기록)
+    # 3) 브로커 보유 종목 확인
     await asyncio.sleep(0.5)
+    broker_symbols = set()
     try:
         holdings = await account_api.get_holdings()
         broker_symbols = {h.symbol for h in holdings}
-        if broker_symbols:
-            bad_trades = (await session.execute(
-                select(Trade).where(Trade.symbol.in_(broker_symbols))
-            )).scalars().all()
-            for t in bad_trades:
-                await session.delete(t)
-                recovered.append(f"잘못된매도기록삭제: {t.symbol} {t.name}")
     except Exception:
-        pass  # API 실패 시 Trade 정리는 건너뜀
+        pass
+
+    # 4) 잘못 생성된 Trade 정리
+    if broker_symbols:
+        bad_trades = (await session.execute(
+            select(Trade).where(Trade.symbol.in_(broker_symbols))
+        )).scalars().all()
+        for t in bad_trades:
+            await session.delete(t)
+            recovered.append(f"잘못된매도기록삭제: {t.symbol} {t.name}")
+
+    # 5) 매수→매도 페어링으로 Trade 기록 생성 (완결된 매매만)
+    all_filled = (await session.execute(
+        select(Order).where(Order.status == "filled").order_by(Order.submitted_at)
+    )).scalars().all()
+
+    # symbol별로 매수/매도 그룹핑
+    from collections import defaultdict
+    buys_by_sym = defaultdict(list)
+    sells_by_sym = defaultdict(list)
+    for o in all_filled:
+        if o.side == "buy":
+            buys_by_sym[o.symbol].append(o)
+        else:
+            sells_by_sym[o.symbol].append(o)
+
+    # 기존 Trade 기록 확인 (중복 방지)
+    existing_trades = (await session.execute(select(Trade))).scalars().all()
+    existing_trade_keys = {(t.symbol, t.entry_price, t.exit_price) for t in existing_trades}
+
+    for symbol, sell_orders in sells_by_sym.items():
+        if symbol in broker_symbols:
+            continue  # 아직 보유 중 → Trade 생성 안 함
+        buy_list = buys_by_sym.get(symbol, [])
+        if not buy_list:
+            continue
+
+        for sell_order in sell_orders:
+            # 매도 시점 이전의 가장 최근 매수 매칭
+            matched_buy = None
+            for buy_order in reversed(buy_list):
+                if buy_order.submitted_at and sell_order.submitted_at:
+                    if buy_order.submitted_at <= sell_order.submitted_at:
+                        matched_buy = buy_order
+                        break
+            if not matched_buy:
+                matched_buy = buy_list[0]
+
+            entry_price = matched_buy.filled_price or 0
+            exit_price = sell_order.filled_price or 0
+            if entry_price <= 0 or exit_price <= 0:
+                continue
+
+            # 중복 체크
+            trade_key = (symbol, entry_price, exit_price)
+            if trade_key in existing_trade_keys:
+                continue
+
+            qty = sell_order.filled_qty or sell_order.qty
+            entry_date = (matched_buy.submitted_at.date() if matched_buy.submitted_at else today_kst.date())
+            exit_date = (sell_order.submitted_at.date() if sell_order.submitted_at else today_kst.date())
+            hold_days = (exit_date - entry_date).days
+
+            trade = Trade(
+                strategy=matched_buy.strategy or "unknown",
+                symbol=symbol,
+                name=matched_buy.name or symbol,
+                entry_date=entry_date,
+                exit_date=exit_date,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+                return_pct=(exit_price / entry_price - 1),
+                pnl=(exit_price - entry_price) * qty,
+                holding_days=hold_days,
+                exit_reason="recovered",
+            )
+            session.add(trade)
+            existing_trade_keys.add(trade_key)
+            recovered.append(f"매매기록: {symbol} {matched_buy.name} 매수{entry_price:,}→매도{exit_price:,} PnL {trade.pnl:+,} ({trade.return_pct:+.1%})")
 
     await session.commit()
 
