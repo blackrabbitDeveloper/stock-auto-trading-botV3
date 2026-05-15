@@ -459,6 +459,52 @@ async def token_cache_status(request: Request):
     return result
 
 
+@app.get("/api/debug-fills")
+async def debug_fills(request: Request, session: AsyncSession = Depends(get_session)):
+    """체결 확인 디버깅: API 응답 + DB 주문 상태 비교."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401)
+
+    from app.models.order import Order
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    trade_client = getattr(request.app.state, "trade_client", None)
+    if not trade_client:
+        return {"error": "trade_client not initialized"}
+
+    account_api = KISAccountAPI(trade_client)
+    today = datetime.now(ZoneInfo("Asia/Seoul"))
+    result = {"env": trade_client.config.env}
+
+    # 최근 3일 체결 API 응답
+    fills_by_date = {}
+    for i in range(3):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        try:
+            fills = await account_api.get_filled_orders(d)
+            fills_by_date[d] = [{"order_no": f.order_no, "symbol": f.symbol, "side": f.side, "qty": f.qty, "price": f.price} for f in fills]
+        except Exception as e:
+            fills_by_date[d] = {"error": str(e)}
+
+    result["api_fills"] = fills_by_date
+
+    # DB 주문 상태
+    stmt = select(Order).order_by(Order.submitted_at.desc()).limit(20)
+    orders = (await session.execute(stmt)).scalars().all()
+    result["db_orders"] = [{
+        "id": o.id, "symbol": o.symbol, "side": o.side, "qty": o.qty,
+        "order_no": o.order_no, "status": o.status,
+        "filled_price": o.filled_price, "submitted_at": str(o.submitted_at),
+    } for o in orders]
+
+    return result
+
+
 @app.post("/trigger/{job_name}")
 async def trigger_job(job_name: str, request: Request):
     """수동으로 job 트리거 (예: POST /trigger/signal_job?token=xxx)."""
