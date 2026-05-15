@@ -596,9 +596,24 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
 
     fill_map = {f.order_no: f for f in all_fills}
 
-    # cancelled 주문 중 체결 데이터가 있는 것 찾기
-    stmt = select(Order).where(Order.status == "cancelled", Order.order_no.isnot(None))
+    # cancelled 주문 중 체결 데이터가 있는 것 찾기 (매수만 — 매도는 위험)
+    # 매도 소급 보정은 포지션 삭제를 수반하므로 자동화하지 않음
+    stmt = select(Order).where(
+        Order.status == "cancelled",
+        Order.side == "buy",
+        Order.order_no.isnot(None),
+    )
     cancelled = (await session.execute(stmt)).scalars().all()
+
+    # 잘못된 Trade 기록 정리 (이전 recover_fills에서 생성된 오류 데이터)
+    from app.models.trade import Trade
+    broker_symbols = set(fill_map.values()) and set()
+    # 브로커 보유 종목 확인
+    try:
+        holdings = await account_api.get_holdings()
+        broker_symbols = {h.symbol for h in holdings}
+    except Exception:
+        pass
 
     recovered = []
     for order in cancelled:
@@ -606,46 +621,41 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         if not fill or fill.qty <= 0:
             continue
 
+        pos = await session.get(Position, order.position_id) if order.position_id else None
+        if not pos:
+            continue
+
+        # 이미 entry_price가 설정되어 있으면 이미 확인된 것
+        if pos.entry_price and pos.entry_price > 0:
+            order.status = "filled"
+            order.filled_price = fill.price
+            order.filled_qty = fill.qty
+            order.filled_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+            recovered.append(f"매수확인(기존): {order.symbol} @ {fill.price:,}")
+            continue
+
         order.status = "filled"
         order.filled_price = fill.price
         order.filled_qty = fill.qty
         order.filled_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
 
-        pos = await session.get(Position, order.position_id) if order.position_id else None
+        pos.entry_price = fill.price
+        pos.peak_price = max(pos.peak_price or 0, fill.price)
+        pos.qty = fill.qty
+        if not pos.sl_price:
+            config = strategy_configs.get(pos.strategy)
+            sl_pct = config.stop_loss_pct if config else 0.03
+            pos.sl_price = int(fill.price * (1 - sl_pct))
+        recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}")
 
-        if order.side == "buy" and pos:
-            pos.entry_price = fill.price
-            pos.peak_price = max(pos.peak_price or 0, fill.price)
-            pos.qty = fill.qty
-            if not pos.sl_price:
-                config = strategy_configs.get(pos.strategy)
-                sl_pct = config.stop_loss_pct if config else 0.03
-                pos.sl_price = int(fill.price * (1 - sl_pct))
-            recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}")
-
-        elif order.side == "sell" and pos:
-            from app.models.trade import Trade
-            trade = Trade(
-                strategy=pos.strategy,
-                symbol=pos.symbol,
-                name=pos.name,
-                entry_date=pos.entry_date or today.date(),
-                exit_date=today.date(),
-                entry_price=pos.entry_price,
-                exit_price=fill.price,
-                qty=fill.qty,
-                return_pct=(fill.price / pos.entry_price - 1) if pos.entry_price else 0,
-                pnl=(fill.price - pos.entry_price) * fill.qty if pos.entry_price else 0,
-                holding_days=pos.holding_days,
-                exit_reason=pos.exit_reason or "manual",
-            )
-            session.add(trade)
-            from sqlalchemy import update as sql_update
-            await session.execute(
-                sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
-            )
-            await session.delete(pos)
-            recovered.append(f"매도확인: {order.symbol} @ {fill.price:,} | PnL {trade.pnl:+,}")
+    # 잘못 생성된 Trade 정리 (브로커에 아직 보유 중인 종목의 매도 기록)
+    if broker_symbols:
+        bad_trades = (await session.execute(
+            select(Trade).where(Trade.symbol.in_(broker_symbols))
+        )).scalars().all()
+        for t in bad_trades:
+            await session.delete(t)
+            recovered.append(f"잘못된매도기록삭제: {t.symbol} {t.name}")
 
     await session.commit()
 
