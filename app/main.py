@@ -241,13 +241,16 @@ async def lifespan(app: FastAPI):
             )
             positions = result.scalars().all()
             updated = []
+            DEFAULT_TRAIL_PCT = 0.05
             for pos in positions:
                 config = strategy_configs.get(pos.strategy)
-                if not config or not pos.peak_price:
+                trail_pct = config.trailing_stop_pct if config else DEFAULT_TRAIL_PCT
+                if not pos.peak_price:
                     continue
-                if pos.holding_days <= (config.sl_skip_days if config else 2):
+                sl_skip = config.sl_skip_days if config else 2
+                if pos.holding_days <= sl_skip:
                     continue
-                new_trail = int(pos.peak_price * (1 - config.trailing_stop_pct))
+                new_trail = int(pos.peak_price * (1 - trail_pct))
                 if new_trail != (pos.trail_price or 0):
                     pos.trail_price = new_trail
                     updated.append(f"{pos.symbol}: trail={new_trail:,}")
@@ -690,6 +693,37 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
             )
             session.add(new_pos)
             actions.append(f"생성: {symbol} {info['name']} @ {info['avg_price']:,} x {info['qty']}")
+
+    # 3. SL/Trail 보정 — 모든 active 포지션 (manual 포함)
+    DEFAULT_SL_PCT = 0.03
+    DEFAULT_TRAIL_PCT = 0.05
+    all_active = (await session.execute(
+        select(Position).where(Position.status == "active")
+    )).scalars().all()
+    strategy_configs = getattr(request.app.state, "strategy_configs", {})
+    for pos in all_active:
+        config = strategy_configs.get(pos.strategy)
+        sl_pct = config.stop_loss_pct if config else DEFAULT_SL_PCT
+        trail_pct = config.trailing_stop_pct if config else DEFAULT_TRAIL_PCT
+
+        sl_changes = []
+        if pos.entry_price and not pos.sl_price:
+            pos.sl_price = int(pos.entry_price * (1 - sl_pct))
+            sl_changes.append(f"SL={pos.sl_price:,}")
+        if not pos.peak_price and pos.entry_price:
+            pos.peak_price = pos.entry_price
+            sl_changes.append(f"peak={pos.peak_price:,}")
+        if pos.peak_price and not pos.trail_price:
+            pos.trail_price = int(pos.peak_price * (1 - trail_pct))
+            sl_changes.append(f"trail={pos.trail_price:,}")
+        # peak 대비 trail 갱신 (더 높은 값으로)
+        if pos.peak_price and pos.trail_price:
+            new_trail = int(pos.peak_price * (1 - trail_pct))
+            if new_trail > pos.trail_price:
+                pos.trail_price = new_trail
+                sl_changes.append(f"trail↑{new_trail:,}")
+        if sl_changes:
+            actions.append(f"SL보정: {pos.symbol} {pos.name} ({', '.join(sl_changes)})")
 
     await session.commit()
 
