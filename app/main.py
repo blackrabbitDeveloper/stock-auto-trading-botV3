@@ -572,39 +572,66 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
 
     actions = []
 
-    # 1. DB positions vs broker
+    # 1. DB positions vs broker — 중복 제거 + 보정
+    from datetime import date
     stmt = select(Position).where(Position.status.in_(["active", "pending_sell"]))
     db_positions = (await session.execute(stmt)).scalars().all()
 
+    # Group by symbol to detect duplicates
+    from collections import defaultdict
+    symbol_groups: dict[str, list] = defaultdict(list)
     for pos in db_positions:
-        if pos.symbol not in broker_map:
-            # 유령 포지션 삭제
-            await session.execute(
-                sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
-            )
-            await session.delete(pos)
-            actions.append(f"삭제: {pos.symbol} {pos.name} ({pos.status})")
-        else:
-            # entry_price / qty 보정
-            broker = broker_map[pos.symbol]
-            changes = []
-            if pos.status == "pending_sell":
-                pos.status = "active"
-                pos.exit_reason = None
-                changes.append("pending_sell→active")
-            if pos.entry_price != broker["avg_price"]:
-                changes.append(f"가격 {pos.entry_price or 0:,}→{broker['avg_price']:,}")
-                pos.entry_price = broker["avg_price"]
-                pos.peak_price = max(pos.peak_price or 0, broker["avg_price"])
-            if pos.qty != broker["qty"]:
-                changes.append(f"수량 {pos.qty or 0}→{broker['qty']}")
-                pos.qty = broker["qty"]
-            if changes:
-                actions.append(f"보정: {pos.symbol} {pos.name} ({', '.join(changes)})")
+        symbol_groups[pos.symbol].append(pos)
+
+    kept_symbols = set()
+    for symbol, positions_list in symbol_groups.items():
+        if symbol not in broker_map:
+            # 유령 포지션 전부 삭제
+            for pos in positions_list:
+                await session.execute(
+                    sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+                )
+                await session.delete(pos)
+                actions.append(f"삭제: {pos.symbol} {pos.name} ({pos.status})")
+            continue
+
+        broker = broker_map[symbol]
+        # 중복이면 active 우선 보존, 나머지 삭제
+        keep = None
+        for pos in positions_list:
+            if keep is None or (pos.status == "active" and keep.status != "active"):
+                keep = pos
+        for pos in positions_list:
+            if pos is not keep:
+                await session.execute(
+                    sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+                )
+                await session.delete(pos)
+                actions.append(f"중복삭제: {pos.symbol} {pos.name} ({pos.status}, entry={pos.entry_price or 0:,})")
+
+        # 보정
+        changes = []
+        if keep.status == "pending_sell":
+            keep.status = "active"
+            keep.exit_reason = None
+            changes.append("pending_sell→active")
+        if keep.entry_price != broker["avg_price"]:
+            changes.append(f"가격 {keep.entry_price or 0:,}→{broker['avg_price']:,}")
+            # entry_price가 달라졌으면 다른 매수 → holding_days 리셋
+            keep.holding_days = 0
+            keep.entry_date = date.today()
+            changes.append("holding_days→0")
+            keep.entry_price = broker["avg_price"]
+            keep.peak_price = broker["avg_price"]
+        if keep.qty != broker["qty"]:
+            changes.append(f"수량 {keep.qty or 0}→{broker['qty']}")
+            keep.qty = broker["qty"]
+        if changes:
+            actions.append(f"보정: {keep.symbol} {keep.name} ({', '.join(changes)})")
+        kept_symbols.add(symbol)
 
     # 2. 계좌에 있는데 DB에 없는 종목
-    from datetime import date
-    db_symbols = {p.symbol for p in db_positions}
+    db_symbols = kept_symbols
     for symbol, info in broker_map.items():
         if symbol not in db_symbols:
             new_pos = Position(
