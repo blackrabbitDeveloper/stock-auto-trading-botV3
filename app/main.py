@@ -519,7 +519,12 @@ async def remove_position(position_id: int, request: Request, session: AsyncSess
 
 @app.post("/sync-prices")
 async def sync_prices(request: Request, session: AsyncSession = Depends(get_session)):
-    """잔고조회 API에서 매입평균가를 가져와 active 포지션의 entry_price를 갱신."""
+    """잔고조회 API 1회로 DB 전체 정합성 맞춤 (reconcile).
+
+    1. 유령 포지션 삭제 (DB에만 존재, 계좌에 없음)
+    2. 미등록 종목 생성 (계좌에 있는데 DB에 없음)
+    3. entry_price / qty 보정
+    """
     settings = AppSettings()
     if settings.dashboard_token:
         token = request.query_params.get("token", "")
@@ -527,14 +532,14 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
             from fastapi import HTTPException
             raise HTTPException(status_code=401, detail="Unauthorized")
 
-    from app.broker.account import KISAccountAPI
     from app.models.position import Position
+    from app.models.order import Order
+    from sqlalchemy import update as sql_update
 
     trade_client = getattr(request.app.state, "trade_client", None)
     if not trade_client:
         return {"error": "trade_client not initialized"}
 
-    account_api = KISAccountAPI(trade_client)
     env = trade_client.config.env
     tr_id = "VTTC8434R" if env == "paper" else "TTTC8434R"
 
@@ -552,25 +557,90 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
         "CTX_AREA_NK100": "",
     })
 
-    holdings = {}
+    # Parse broker holdings
+    broker_map = {}
     for item in data.get("output1", []):
         symbol = item.get("pdno", "")
-        avg_price = int(float(item.get("pchs_avg_pric", "0")))
-        if symbol and avg_price > 0:
-            holdings[symbol] = avg_price
+        qty = int(item.get("hldg_qty", 0))
+        if not symbol or qty <= 0:
+            continue
+        broker_map[symbol] = {
+            "name": item.get("prdt_name", ""),
+            "qty": qty,
+            "avg_price": int(float(item.get("pchs_avg_pric", "0"))),
+        }
 
-    stmt = select(Position).where(Position.status == "active")
-    positions = (await session.execute(stmt)).scalars().all()
+    actions = []
 
-    updated = []
-    for pos in positions:
-        if pos.symbol in holdings:
-            old_price = pos.entry_price
-            new_price = holdings[pos.symbol]
-            if old_price != new_price:
-                pos.entry_price = new_price
-                pos.peak_price = max(pos.peak_price or 0, new_price)
-                updated.append(f"{pos.symbol} {pos.name}: {old_price or 0:,} -> {new_price:,}")
+    # 1. DB positions vs broker
+    stmt = select(Position).where(Position.status.in_(["active", "pending_sell"]))
+    db_positions = (await session.execute(stmt)).scalars().all()
+
+    for pos in db_positions:
+        if pos.symbol not in broker_map:
+            # 유령 포지션 삭제
+            await session.execute(
+                sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+            )
+            await session.delete(pos)
+            actions.append(f"삭제: {pos.symbol} {pos.name} ({pos.status})")
+        else:
+            # entry_price / qty 보정
+            broker = broker_map[pos.symbol]
+            changes = []
+            if pos.status == "pending_sell":
+                pos.status = "active"
+                pos.exit_reason = None
+                changes.append("pending_sell→active")
+            if pos.entry_price != broker["avg_price"]:
+                changes.append(f"가격 {pos.entry_price or 0:,}→{broker['avg_price']:,}")
+                pos.entry_price = broker["avg_price"]
+                pos.peak_price = max(pos.peak_price or 0, broker["avg_price"])
+            if pos.qty != broker["qty"]:
+                changes.append(f"수량 {pos.qty or 0}→{broker['qty']}")
+                pos.qty = broker["qty"]
+            if changes:
+                actions.append(f"보정: {pos.symbol} {pos.name} ({', '.join(changes)})")
+
+    # 2. 계좌에 있는데 DB에 없는 종목
+    from datetime import date
+    db_symbols = {p.symbol for p in db_positions}
+    for symbol, info in broker_map.items():
+        if symbol not in db_symbols:
+            new_pos = Position(
+                strategy="manual",
+                symbol=symbol,
+                name=info["name"],
+                status="active",
+                signal_date=date.today(),
+                entry_date=date.today(),
+                entry_price=info["avg_price"],
+                qty=info["qty"],
+                peak_price=info["avg_price"],
+            )
+            session.add(new_pos)
+            actions.append(f"생성: {symbol} {info['name']} @ {info['avg_price']:,} x {info['qty']}")
 
     await session.commit()
-    return {"status": "ok", "updated": len(updated), "details": updated}
+
+    # SL 모니터 갱신
+    sl_monitor = getattr(request.app.state, "sl_monitor", None)
+    if sl_monitor:
+        from app.models import database as db_module
+        async with db_module.async_session_factory() as s2:
+            result = await s2.execute(select(Position).where(Position.status == "active"))
+            positions = result.scalars().all()
+            pos_map = {}
+            strategy_configs = getattr(request.app.state, "strategy_configs", {})
+            for p in positions:
+                config = strategy_configs.get(p.strategy)
+                pos_map[p.symbol] = {
+                    "sl_price": p.sl_price or 0,
+                    "trail_price": p.trail_price or 0,
+                    "peak_price": p.peak_price or 0,
+                    "trailing_stop_pct": config.trailing_stop_pct if config else 0.05,
+                    "qty": p.qty or 0,
+                }
+            await sl_monitor.update_positions(pos_map)
+
+    return {"status": "ok", "updated": len(actions), "details": actions}

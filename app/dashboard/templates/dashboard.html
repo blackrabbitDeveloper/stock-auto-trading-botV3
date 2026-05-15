@@ -33,7 +33,7 @@
         const token = new URLSearchParams(window.location.search).get('token') || '';
         const btn = event.target;
         btn.disabled = true;
-        btn.textContent = '동기화중...';
+        btn.textContent = 'DB 정리중...';
         try {
             const resp = await fetch(`/sync-prices?token=${token}`, {method: 'POST'});
             const data = await resp.json();
@@ -111,7 +111,7 @@
                 <button onclick="triggerJob('order_job')" class="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded text-sm font-medium">💰 주문 실행</button>
                 <button onclick="triggerJob('confirm_job')" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 rounded text-sm font-medium">✅ 체결 확인</button>
                 <button onclick="triggerJob('position_sync')" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 rounded text-sm font-medium">🔄 포지션 동기화</button>
-                <button onclick="syncPrices()" class="px-3 py-1.5 bg-yellow-600 hover:bg-yellow-500 rounded text-sm font-medium">🔄 매수가 동기화</button>
+                <button onclick="syncPrices()" class="px-3 py-1.5 bg-yellow-600 hover:bg-yellow-500 rounded text-sm font-medium">🔄 DB 정리 (계좌 기준)</button>
                 <button onclick="toggleTrading()" class="px-3 py-1.5 {% if trading_paused %}bg-green-600 hover:bg-green-500{% else %}bg-orange-600 hover:bg-orange-500{% endif %} rounded text-sm font-medium">{% if trading_paused %}▶️ 재개{% else %}⏸ 일시정지{% endif %}</button>
                 <button onclick="resetPositions()" class="px-3 py-1.5 bg-red-700 hover:bg-red-600 rounded text-sm font-medium">🗑 초기화</button>
             </div>
