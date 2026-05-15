@@ -601,7 +601,7 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
     fill_map = {f.order_no: f for f in all_fills}
     recovered = []
 
-    # 2) cancelled 매수 주문 → 체결 확인
+    # 2) cancelled 매수 주문 → 체결 확인 (symbol로 현재 포지션 매칭)
     cancelled_buys = (await session.execute(
         select(Order).where(
             Order.status == "cancelled",
@@ -610,14 +610,23 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         )
     )).scalars().all()
 
+    # 현재 active 포지션을 symbol로 인덱싱
+    active_positions = (await session.execute(
+        select(Position).where(Position.status == "active")
+    )).scalars().all()
+    pos_by_symbol = {p.symbol: p for p in active_positions}
+
     for order in cancelled_buys:
         fill = fill_map.get(order.order_no)
         if not fill or fill.qty <= 0:
             continue
-        if not order.position_id:
-            continue
 
-        pos = await session.get(Position, order.position_id)
+        # position_id로 찾고, 없으면 symbol로 매칭
+        pos = None
+        if order.position_id:
+            pos = await session.get(Position, order.position_id)
+        if not pos:
+            pos = pos_by_symbol.get(order.symbol)
         if not pos:
             continue
 
@@ -627,18 +636,20 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         order.filled_qty = fill.qty
         order.filled_at = now_naive
 
-        # 포지션에 entry_price가 없으면 설정
+        # 포지션 보정
+        changes = []
         if not pos.entry_price or pos.entry_price <= 0:
             pos.entry_price = fill.price
             pos.peak_price = max(pos.peak_price or 0, fill.price)
             pos.qty = fill.qty
-            if not pos.sl_price:
-                config = strat_configs.get(pos.strategy)
-                sl_pct = config.stop_loss_pct if config else 0.03
-                pos.sl_price = int(fill.price * (1 - sl_pct))
-            recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}")
-        else:
-            recovered.append(f"매수확인(기존): {order.symbol} @ {fill.price:,}")
+            changes.append(f"entry={fill.price:,}")
+        if not pos.sl_price:
+            config = strat_configs.get(pos.strategy)
+            sl_pct = config.stop_loss_pct if config else 0.03
+            pos.sl_price = int((pos.entry_price or fill.price) * (1 - sl_pct))
+            changes.append(f"SL={pos.sl_price:,}")
+        detail = f" ({', '.join(changes)})" if changes else ""
+        recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}{detail}")
 
     # 3) 잘못 생성된 Trade 정리 (브로커에 보유 중인 종목의 매도 기록)
     await asyncio.sleep(0.5)
