@@ -558,6 +558,117 @@ async def toggle_trading(request: Request):
     return {"status": state}
 
 
+@app.post("/api/recover-fills")
+async def recover_fills(request: Request, session: AsyncSession = Depends(get_session)):
+    """cancelled 주문을 API 체결 데이터와 매칭하여 소급 보정."""
+    settings = AppSettings()
+    if settings.dashboard_token:
+        token = request.query_params.get("token", "")
+        if token != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401)
+
+    from app.models.order import Order
+    from app.models.position import Position
+    from app.broker.account import KISAccountAPI
+    import asyncio
+
+    trade_client = getattr(request.app.state, "trade_client", None)
+    if not trade_client:
+        return {"error": "trade_client not initialized"}
+
+    account_api = KISAccountAPI(trade_client)
+
+    # 최근 7일 체결 데이터 수집
+    from datetime import timedelta
+    today = datetime.now(ZoneInfo("Asia/Seoul"))
+    all_fills = []
+    for i in range(7):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        try:
+            fills = await account_api.get_filled_orders(d)
+            all_fills.extend(fills)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+    fill_map = {f.order_no: f for f in all_fills}
+
+    # cancelled 주문 중 체결 데이터가 있는 것 찾기
+    stmt = select(Order).where(Order.status == "cancelled", Order.order_no.isnot(None))
+    cancelled = (await session.execute(stmt)).scalars().all()
+
+    recovered = []
+    for order in cancelled:
+        fill = fill_map.get(order.order_no)
+        if not fill or fill.qty <= 0:
+            continue
+
+        order.status = "filled"
+        order.filled_price = fill.price
+        order.filled_qty = fill.qty
+        order.filled_at = datetime.now(ZoneInfo("Asia/Seoul"))
+
+        pos = await session.get(Position, order.position_id) if order.position_id else None
+
+        if order.side == "buy" and pos:
+            pos.entry_price = fill.price
+            pos.peak_price = max(pos.peak_price or 0, fill.price)
+            pos.qty = fill.qty
+            if not pos.sl_price:
+                config = strategy_configs.get(pos.strategy)
+                sl_pct = config.stop_loss_pct if config else 0.03
+                pos.sl_price = int(fill.price * (1 - sl_pct))
+            recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}")
+
+        elif order.side == "sell" and pos:
+            from app.models.trade import Trade
+            trade = Trade(
+                strategy=pos.strategy,
+                symbol=pos.symbol,
+                name=pos.name,
+                entry_date=pos.entry_date or today.date(),
+                exit_date=today.date(),
+                entry_price=pos.entry_price,
+                exit_price=fill.price,
+                qty=fill.qty,
+                return_pct=(fill.price / pos.entry_price - 1) if pos.entry_price else 0,
+                pnl=(fill.price - pos.entry_price) * fill.qty if pos.entry_price else 0,
+                holding_days=pos.holding_days,
+                exit_reason=pos.exit_reason or "manual",
+            )
+            session.add(trade)
+            from sqlalchemy import update as sql_update
+            await session.execute(
+                sql_update(Order).where(Order.position_id == pos.id).values(position_id=None)
+            )
+            await session.delete(pos)
+            recovered.append(f"매도확인: {order.symbol} @ {fill.price:,} | PnL {trade.pnl:+,}")
+
+    await session.commit()
+
+    # SL 모니터 갱신
+    sl_monitor = getattr(request.app.state, "sl_monitor", None)
+    if sl_monitor and recovered:
+        from app.models import database as db_module
+        async with db_module.async_session_factory() as s2:
+            result = await s2.execute(select(Position).where(Position.status == "active"))
+            positions = result.scalars().all()
+            pos_map = {}
+            for p in positions:
+                config = strategy_configs.get(p.strategy)
+                pos_map[p.symbol] = {
+                    "sl_price": p.sl_price or 0,
+                    "trail_price": p.trail_price or 0,
+                    "peak_price": p.peak_price or 0,
+                    "trailing_stop_pct": config.trailing_stop_pct if config else 0.05,
+                    "qty": p.qty or 0,
+                }
+            await sl_monitor.update_positions(pos_map)
+
+    return {"status": "ok", "recovered": len(recovered), "details": recovered}
+
+
 @app.post("/reset-positions")
 async def reset_positions(request: Request, session: AsyncSession = Depends(get_session)):
     """Delete all pending positions (for clean re-scan)."""

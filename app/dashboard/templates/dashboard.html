@@ -49,6 +49,25 @@
             alert(e.message);
         }
     }
+    async function recoverFills() {
+        if (!confirm('cancelled 주문을 체결 데이터와 매칭하여 소급 보정하시겠습니까?')) return;
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        const btn = event.target;
+        btn.disabled = true;
+        btn.textContent = '보정중...';
+        try {
+            const resp = await fetch(`/api/recover-fills?token=${token}`, {method: 'POST'});
+            const data = await resp.json();
+            if (data.status === 'ok') {
+                btn.textContent = `✓ ${data.recovered}건 보정`;
+                if (data.details.length > 0) alert(data.details.join('\n'));
+                setTimeout(() => location.reload(), 1500);
+            } else {
+                btn.textContent = '✗ 실패';
+                alert(JSON.stringify(data));
+            }
+        } catch(e) { btn.textContent = '✗ 에러'; alert(e.message); }
+    }
     async function resetHolding(posId, name) {
         if (!confirm(`${name} 보유일을 0으로 리셋하시겠습니까?`)) return;
         const token = new URLSearchParams(window.location.search).get('token') || '';
@@ -121,6 +140,7 @@
                 <button onclick="triggerJob('confirm_job')" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 rounded text-sm font-medium">✅ 체결 확인</button>
                 <button onclick="triggerJob('position_sync')" class="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 rounded text-sm font-medium">🔄 포지션 동기화</button>
                 <button onclick="syncPrices()" class="px-3 py-1.5 bg-yellow-600 hover:bg-yellow-500 rounded text-sm font-medium">🔄 DB 정리 (계좌 기준)</button>
+                <button onclick="recoverFills()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium">🔁 체결 소급 보정</button>
                 <button onclick="toggleTrading()" class="px-3 py-1.5 {% if trading_paused %}bg-green-600 hover:bg-green-500{% else %}bg-orange-600 hover:bg-orange-500{% endif %} rounded text-sm font-medium">{% if trading_paused %}▶️ 재개{% else %}⏸ 일시정지{% endif %}</button>
                 <button onclick="resetPositions()" class="px-3 py-1.5 bg-red-700 hover:bg-red-600 rounded text-sm font-medium">🗑 초기화</button>
             </div>
