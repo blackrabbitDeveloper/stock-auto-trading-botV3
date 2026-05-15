@@ -293,7 +293,7 @@ class OrderExecutor:
         db_order.status = "filled"
         db_order.filled_price = fill.price
         db_order.filled_qty = fill.qty
-        db_order.filled_at = datetime.now(KST)
+        db_order.filled_at = datetime.now(KST).replace(tzinfo=None)
 
         pos = await session.get(Position, db_order.position_id)
         if not pos:
