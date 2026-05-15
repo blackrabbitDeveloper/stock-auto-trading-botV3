@@ -586,7 +586,17 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
     now_naive = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     today_kst = datetime.now(ZoneInfo("Asia/Seoul"))
 
-    # 1) 최근 7일 체결 데이터 수집
+    # 1) 브로커 보유 종목 먼저 확인 (rate limit 전에)
+    broker_symbols = set()
+    try:
+        holdings = await account_api.get_holdings()
+        broker_symbols = {h.symbol for h in holdings}
+    except Exception as e:
+        return {"error": f"보유 종목 조회 실패 (먼저 실행 필요): {e}"}
+
+    await asyncio.sleep(1.0)
+
+    # 2) 최근 7일 체결 데이터 수집
     all_fills = []
     for i in range(7):
         d = (today_kst - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -651,16 +661,7 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         detail = f" ({', '.join(changes)})" if changes else ""
         recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}{detail}")
 
-    # 3) 브로커 보유 종목 확인
-    await asyncio.sleep(0.5)
-    broker_symbols = set()
-    try:
-        holdings = await account_api.get_holdings()
-        broker_symbols = {h.symbol for h in holdings}
-    except Exception:
-        pass
-
-    # 4) 잘못 생성된 Trade 정리
+    # 3) 잘못 생성된 Trade 정리 (step 1에서 확보한 broker_symbols 사용)
     if broker_symbols:
         bad_trades = (await session.execute(
             select(Trade).where(Trade.symbol.in_(broker_symbols))
@@ -669,7 +670,7 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
             await session.delete(t)
             recovered.append(f"잘못된매도기록삭제: {t.symbol} {t.name}")
 
-    # 5) 매수→매도 페어링으로 Trade 기록 생성 (완결된 매매만)
+    # 4) 매수→매도 페어링으로 Trade 기록 생성 (완결된 매매만)
     all_filled = (await session.execute(
         select(Order).where(Order.status == "filled").order_by(Order.submitted_at)
     )).scalars().all()
