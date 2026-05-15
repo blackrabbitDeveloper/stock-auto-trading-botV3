@@ -609,7 +609,7 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
         order.status = "filled"
         order.filled_price = fill.price
         order.filled_qty = fill.qty
-        order.filled_at = datetime.now(ZoneInfo("Asia/Seoul"))
+        order.filled_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
 
         pos = await session.get(Position, order.position_id) if order.position_id else None
 
