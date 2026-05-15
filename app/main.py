@@ -607,7 +607,7 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
 
     # 잘못된 Trade 기록 정리 (이전 recover_fills에서 생성된 오류 데이터)
     from app.models.trade import Trade
-    broker_symbols = set(fill_map.values()) and set()
+    broker_symbols = set()
     # 브로커 보유 종목 확인
     try:
         holdings = await account_api.get_holdings()
