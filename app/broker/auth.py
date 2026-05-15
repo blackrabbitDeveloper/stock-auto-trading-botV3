@@ -52,7 +52,7 @@ async def _save_token_cache(config: KISConfig, token: str):
     _mem_cache[env] = (token, time.time())
     try:
         from app.models import database as db_module
-        if not async_session_factory:
+        if not db_module.async_session_factory:
             return
         from app.models.token_cache import TokenCache
         async with db_module.async_session_factory() as session:
