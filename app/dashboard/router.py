@@ -157,6 +157,7 @@ async def dashboard(request: Request, session: AsyncSession = Depends(get_sessio
             "sl_price": pos.sl_price if pos else None,
             "trail_price": pos.trail_price if pos else None,
             "holding_days": pos.holding_days if pos else None,
+            "position_id": pos.id if pos else None,
             "has_ws": sym in ws_prices,
         })
 
@@ -228,6 +229,20 @@ async def cancel_pending_sell(position_id: int, session: AsyncSession = Depends(
     pos.exit_reason = None
     await session.commit()
     return {"ok": True, "symbol": pos.symbol, "name": pos.name}
+
+
+@router.post("/api/reset-holding/{position_id}")
+async def reset_holding_days(position_id: int, session: AsyncSession = Depends(get_session), _=Depends(verify_token)):
+    """보유일 리셋 (entry_date=today, holding_days=0)."""
+    from datetime import date
+    pos = await session.get(Position, position_id)
+    if not pos:
+        raise HTTPException(status_code=404, detail="Position not found")
+    old_days = pos.holding_days
+    pos.holding_days = 0
+    pos.entry_date = date.today()
+    await session.commit()
+    return {"ok": True, "symbol": pos.symbol, "name": pos.name, "old_days": old_days}
 
 
 @router.post("/api/delete-position/{position_id}")

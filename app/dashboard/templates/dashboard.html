@@ -49,6 +49,15 @@
             alert(e.message);
         }
     }
+    async function resetHolding(posId, name) {
+        if (!confirm(`${name} 보유일을 0으로 리셋하시겠습니까?`)) return;
+        const token = new URLSearchParams(window.location.search).get('token') || '';
+        try {
+            const resp = await fetch(`/api/reset-holding/${posId}?token=${token}`, {method: 'POST'});
+            if (resp.ok) { location.reload(); }
+            else { alert('실패: ' + (await resp.json()).detail); }
+        } catch(e) { alert(e.message); }
+    }
     async function cancelSell(posId, name) {
         if (!confirm(`${name} 매도를 취소하고 보유로 복구하시겠습니까?`)) return;
         const token = new URLSearchParams(window.location.search).get('token') || '';
@@ -334,7 +343,12 @@
                                 {{ "{:,}".format([h.sl_price or 0, h.trail_price or 0]|max) }}
                                 {% else %}-{% endif %}
                             </td>
-                            <td class="text-right">{{ "{}d".format(h.holding_days) if h.holding_days is not none else "-" }}</td>
+                            <td class="text-right">
+                                {{ "{}d".format(h.holding_days) if h.holding_days is not none else "-" }}
+                                {% if h.position_id and h.holding_days and h.holding_days > 0 %}
+                                <button onclick="resetHolding({{ h.position_id }}, '{{ h.name }}')" class="ml-1 px-1 py-0.5 text-[10px] bg-gray-700 hover:bg-blue-700 text-gray-400 hover:text-white rounded transition" title="보유일 리셋">↺</button>
+                                {% endif %}
+                            </td>
                         </tr>
                         {% endfor %}
                         {% if not holdings %}
