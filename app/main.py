@@ -1002,6 +1002,23 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
         if sl_changes:
             actions.append(f"SL보정: {pos.symbol} {pos.name} ({', '.join(sl_changes)})")
 
+    # 4. manual 전략 복구 — 매수 주문 기록에서 원래 전략 찾기
+    from app.models.order import Order as OrderModel
+    manual_positions = [p for p in all_active if p.strategy == "manual"]
+    if manual_positions:
+        for pos in manual_positions:
+            buy_order = (await session.execute(
+                select(OrderModel).where(
+                    OrderModel.symbol == pos.symbol,
+                    OrderModel.side == "buy",
+                    OrderModel.strategy != "manual",
+                    OrderModel.strategy.isnot(None),
+                ).order_by(OrderModel.submitted_at.desc())
+            )).scalars().first()
+            if buy_order:
+                actions.append(f"전략복구: {pos.symbol} {pos.name} manual→{buy_order.strategy}")
+                pos.strategy = buy_order.strategy
+
     await session.commit()
 
     # SL 모니터 갱신
