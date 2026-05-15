@@ -617,12 +617,23 @@ async def sync_prices(request: Request, session: AsyncSession = Depends(get_sess
             changes.append("pending_sell→active")
         if keep.entry_price != broker["avg_price"]:
             changes.append(f"가격 {keep.entry_price or 0:,}→{broker['avg_price']:,}")
-            # entry_price가 달라졌으면 다른 매수 → holding_days 리셋
             keep.holding_days = 0
             keep.entry_date = date.today()
             changes.append("holding_days→0")
             keep.entry_price = broker["avg_price"]
             keep.peak_price = broker["avg_price"]
+        # entry_date 기반 holding_days 검증
+        if keep.entry_date:
+            expected_days = (date.today() - keep.entry_date).days
+            if keep.holding_days != expected_days:
+                changes.append(f"보유일 {keep.holding_days}→{expected_days}")
+                keep.holding_days = expected_days
+        elif keep.strategy == "manual":
+            # sync로 생성된 manual 포지션은 entry_date=today
+            keep.entry_date = date.today()
+            if keep.holding_days != 0:
+                changes.append(f"보유일 {keep.holding_days}→0")
+                keep.holding_days = 0
         if keep.qty != broker["qty"]:
             changes.append(f"수량 {keep.qty or 0}→{broker['qty']}")
             keep.qty = broker["qty"]

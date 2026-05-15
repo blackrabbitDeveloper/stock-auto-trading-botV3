@@ -26,10 +26,10 @@ async def _load_cached_token(config: KISConfig) -> str:
     env = _env_key(config)
     # Try DB first
     try:
-        from app.models import async_session_factory
-        if async_session_factory:
+        from app.models import database as db_module
+        if db_module.async_session_factory:
             from app.models.token_cache import TokenCache
-            async with async_session_factory() as session:
+            async with db_module.async_session_factory() as session:
                 row = await session.get(TokenCache, env)
                 if row:
                     age = (datetime.now(timezone.utc) - row.issued_at.replace(tzinfo=timezone.utc)).total_seconds()
@@ -51,11 +51,11 @@ async def _save_token_cache(config: KISConfig, token: str):
     env = _env_key(config)
     _mem_cache[env] = (token, time.time())
     try:
-        from app.models import async_session_factory
+        from app.models import database as db_module
         if not async_session_factory:
             return
         from app.models.token_cache import TokenCache
-        async with async_session_factory() as session:
+        async with db_module.async_session_factory() as session:
             existing = await session.get(TokenCache, env)
             if existing:
                 existing.token = token
