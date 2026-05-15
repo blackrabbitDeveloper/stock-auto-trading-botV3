@@ -199,6 +199,8 @@ class OrderExecutor:
                 all_filled.extend(fills)
             except Exception as e:
                 logger.warning(f"Failed to query fills for {query_date}: {e}")
+            if i < lookback_days - 1:
+                await asyncio.sleep(0.5)  # API 속도 제한 방지
 
         # Deduplicate by order_no
         seen = set()

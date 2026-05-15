@@ -281,6 +281,22 @@ async def lifespan(app: FastAPI):
     async def _stale_order_cleanup():
         if not _is_trading_day():
             return
+        # 취소 전 마지막 체결 확인 시도 (API 속도 제한으로 놓친 체결 복구)
+        try:
+            async with db_module.async_session_factory() as session:
+                today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+                results = await executor.confirm_fills(session, today_str, lookback_days=3)
+                if results:
+                    lines = ["## ✅ 장마감 전 체결 확인 (복구)"]
+                    for r in results:
+                        if r["type"] == "buy_filled":
+                            lines.append(f"> 매수 {r['symbol']} {r['name']} @ {r['price']:,} x {r['qty']}")
+                        elif r["type"] == "sell_filled":
+                            lines.append(f"> 매도 {r['symbol']} {r['name']} @ {r['price']:,} | {r['return_pct']:+.1%}")
+                    await notifier.send("\n".join(lines))
+                    logger.info(f"Pre-cleanup confirm: {len(results)} fills recovered")
+        except Exception as e:
+            logger.warning(f"Pre-cleanup confirm failed: {e}")
         async with db_module.async_session_factory() as session:
             await run_stale_order_cleanup(session, notifier)
 
