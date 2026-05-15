@@ -560,106 +560,104 @@ async def toggle_trading(request: Request):
 
 @app.post("/api/recover-fills")
 async def recover_fills(request: Request, session: AsyncSession = Depends(get_session)):
-    """cancelled 주문을 API 체결 데이터와 매칭하여 소급 보정."""
+    """cancelled 매수 주문을 API 체결 데이터와 매칭 + 잘못된 Trade 정리."""
+    import asyncio
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
-    settings = AppSettings()
-    if settings.dashboard_token:
-        token = request.query_params.get("token", "")
-        if token != settings.dashboard_token:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=401)
 
     from app.models.order import Order
     from app.models.position import Position
+    from app.models.trade import Trade
     from app.broker.account import KISAccountAPI
-    import asyncio
+
+    settings = AppSettings()
+    if settings.dashboard_token:
+        tok = request.query_params.get("token", "")
+        if tok != settings.dashboard_token:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=401)
 
     trade_client = getattr(request.app.state, "trade_client", None)
     if not trade_client:
         return {"error": "trade_client not initialized"}
 
+    strat_configs = getattr(request.app.state, "strategy_configs", {})
     account_api = KISAccountAPI(trade_client)
+    now_naive = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    today_kst = datetime.now(ZoneInfo("Asia/Seoul"))
 
-    # 최근 7일 체결 데이터 수집
-    from datetime import timedelta
-    today = datetime.now(ZoneInfo("Asia/Seoul"))
+    # 1) 최근 7일 체결 데이터 수집
     all_fills = []
     for i in range(7):
-        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        d = (today_kst - timedelta(days=i)).strftime("%Y-%m-%d")
         try:
             fills = await account_api.get_filled_orders(d)
             all_fills.extend(fills)
         except Exception:
             pass
-        await asyncio.sleep(0.5)
+        if i < 6:
+            await asyncio.sleep(0.5)
 
     fill_map = {f.order_no: f for f in all_fills}
-
-    # cancelled 주문 중 체결 데이터가 있는 것 찾기 (매수만 — 매도는 위험)
-    # 매도 소급 보정은 포지션 삭제를 수반하므로 자동화하지 않음
-    stmt = select(Order).where(
-        Order.status == "cancelled",
-        Order.side == "buy",
-        Order.order_no.isnot(None),
-    )
-    cancelled = (await session.execute(stmt)).scalars().all()
-
-    # 잘못된 Trade 기록 정리 (이전 recover_fills에서 생성된 오류 데이터)
-    from app.models.trade import Trade
-    broker_symbols = set()
-    # 브로커 보유 종목 확인
-    try:
-        holdings = await account_api.get_holdings()
-        broker_symbols = {h.symbol for h in holdings}
-    except Exception:
-        pass
-
     recovered = []
-    for order in cancelled:
+
+    # 2) cancelled 매수 주문 → 체결 확인
+    cancelled_buys = (await session.execute(
+        select(Order).where(
+            Order.status == "cancelled",
+            Order.side == "buy",
+            Order.order_no.isnot(None),
+        )
+    )).scalars().all()
+
+    for order in cancelled_buys:
         fill = fill_map.get(order.order_no)
         if not fill or fill.qty <= 0:
             continue
+        if not order.position_id:
+            continue
 
-        pos = await session.get(Position, order.position_id) if order.position_id else None
+        pos = await session.get(Position, order.position_id)
         if not pos:
             continue
 
-        # 이미 entry_price가 설정되어 있으면 이미 확인된 것
-        if pos.entry_price and pos.entry_price > 0:
-            order.status = "filled"
-            order.filled_price = fill.price
-            order.filled_qty = fill.qty
-            order.filled_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
-            recovered.append(f"매수확인(기존): {order.symbol} @ {fill.price:,}")
-            continue
-
+        # 주문 상태 업데이트
         order.status = "filled"
         order.filled_price = fill.price
         order.filled_qty = fill.qty
-        order.filled_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+        order.filled_at = now_naive
 
-        pos.entry_price = fill.price
-        pos.peak_price = max(pos.peak_price or 0, fill.price)
-        pos.qty = fill.qty
-        if not pos.sl_price:
-            config = strategy_configs.get(pos.strategy)
-            sl_pct = config.stop_loss_pct if config else 0.03
-            pos.sl_price = int(fill.price * (1 - sl_pct))
-        recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}")
+        # 포지션에 entry_price가 없으면 설정
+        if not pos.entry_price or pos.entry_price <= 0:
+            pos.entry_price = fill.price
+            pos.peak_price = max(pos.peak_price or 0, fill.price)
+            pos.qty = fill.qty
+            if not pos.sl_price:
+                config = strat_configs.get(pos.strategy)
+                sl_pct = config.stop_loss_pct if config else 0.03
+                pos.sl_price = int(fill.price * (1 - sl_pct))
+            recovered.append(f"매수확인: {order.symbol} @ {fill.price:,} x {fill.qty}")
+        else:
+            recovered.append(f"매수확인(기존): {order.symbol} @ {fill.price:,}")
 
-    # 잘못 생성된 Trade 정리 (브로커에 아직 보유 중인 종목의 매도 기록)
-    if broker_symbols:
-        bad_trades = (await session.execute(
-            select(Trade).where(Trade.symbol.in_(broker_symbols))
-        )).scalars().all()
-        for t in bad_trades:
-            await session.delete(t)
-            recovered.append(f"잘못된매도기록삭제: {t.symbol} {t.name}")
+    # 3) 잘못 생성된 Trade 정리 (브로커에 보유 중인 종목의 매도 기록)
+    await asyncio.sleep(0.5)
+    try:
+        holdings = await account_api.get_holdings()
+        broker_symbols = {h.symbol for h in holdings}
+        if broker_symbols:
+            bad_trades = (await session.execute(
+                select(Trade).where(Trade.symbol.in_(broker_symbols))
+            )).scalars().all()
+            for t in bad_trades:
+                await session.delete(t)
+                recovered.append(f"잘못된매도기록삭제: {t.symbol} {t.name}")
+    except Exception:
+        pass  # API 실패 시 Trade 정리는 건너뜀
 
     await session.commit()
 
-    # SL 모니터 갱신
+    # 4) SL 모니터 갱신
     sl_monitor = getattr(request.app.state, "sl_monitor", None)
     if sl_monitor and recovered:
         from app.models import database as db_module
@@ -668,7 +666,7 @@ async def recover_fills(request: Request, session: AsyncSession = Depends(get_se
             positions = result.scalars().all()
             pos_map = {}
             for p in positions:
-                config = strategy_configs.get(p.strategy)
+                config = strat_configs.get(p.strategy)
                 pos_map[p.symbol] = {
                     "sl_price": p.sl_price or 0,
                     "trail_price": p.trail_price or 0,
